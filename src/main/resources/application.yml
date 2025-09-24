@@ -1,0 +1,12 @@
+spring:
+  profiles:
+    active: dev           # 기본으로 dev 프로필 사용(원하면 제거하고 실행시 지정해도 됨)
+  main:
+    lazy-initialization: true
+    allow-bean-definition-overriding: true
+  jackson:
+    time-zone: Asia/Seoul
+
+opendart:
+  base-url: https://opendart.fss.or.kr
+  api-key: ${OPENDART_API_KEY:}   # 환경변수 주입(없으면 빈값). dev에서 override됨.
