@@ -1,0 +1,46 @@
+server:
+  port: 8080
+
+spring:
+  codec:
+    max-in-memory-size: 10MB
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/sit?serverTimezone=Asia/Seoul&useSSL=false&allowPublicKeyRetrieval=true&useUnicode=true&characterEncoding=utf8
+    username: root
+    password: 1234
+    hikari:
+      connection-timeout: 5000
+      initialization-fail-timeout: 0
+      minimum-idle: 1
+      maximum-pool-size: 5
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        # Hibernate 6에서는 dialect 지정이 필요없고, MySQL8Dialect 경고가 떠서 명시 제거 권장
+        # dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: true
+        jdbc.time_zone: Asia/Seoul
+        order_inserts: true
+        order_updates: true
+        generate_statistics: false
+        jdbc:
+          batch_size: 1000
+
+logging:
+  level:
+    org.hibernate.SQL: debug
+    org.hibernate.orm.jdbc.bind: trace
+    org.springframework.jdbc.core.JdbcTemplate: debug
+    org.springframework.jdbc.core.StatementCreatorUtils: trace
+
+impacttracker:
+  ingest:
+    on-startup: true
+    months-back: 0
+    parallelism: 1       # ← 네트워크 불안정/429 피하려고 일단 1로 낮춤
+
+opendart:
+  api-key: 3dde5cf4bc869c78a13742e04fb27b08fed33530
