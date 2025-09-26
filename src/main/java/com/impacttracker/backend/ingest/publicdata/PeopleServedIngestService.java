@@ -1,134 +1,124 @@
 package com.impacttracker.backend.ingest.publicdata;
 
-import com.impacttracker.backend.domain.KpiMonthly;
-import com.impacttracker.backend.domain.Organization;
-import com.impacttracker.backend.repo.KpiMonthlyRepository;
+import com.impacttracker.backend.domain.KpiMetric;
+import com.impacttracker.backend.service.KpiService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.time.YearMonth;
-import java.util.Optional;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.Map;
+import java.util.Objects;
 
 /**
- * 공개데이터/내부 지표 등에서 "사람에게 미친 긍정적 영향"을 월별 KPI로 적재하는 서비스.
- * - PEOPLE_SERVED_COUNT (long)
- * - VOLUNTEER_HOURS (long)
- * - COMMUNITY_DONATION_MATCH_KRW (decimal)
+ * 공공데이터 등에서 수집된 "수혜 인원(PEOPLE_SERVED_COUNT)" 월별 데이터를
+ * kpi_monthly 로 적재하는 서비스.
  *
- * 주의: KpiMonthlyRepository에는 upsertAll 같은 메서드가 없습니다.
- * 여기서 find → update 또는 insert(=upsert)를 직접 수행합니다.
+ * 기존 코드에서 KpiMonthly.Metric 을 사용하던 부분을 KpiMetric 으로 전환했습니다.
  */
 @Service
 public class PeopleServedIngestService {
 
     private static final Logger log = LoggerFactory.getLogger(PeopleServedIngestService.class);
+    private static final DateTimeFormatter YM = DateTimeFormatter.ofPattern("yyyy-MM");
 
-    private final KpiMonthlyRepository kpiRepo;
+    private final KpiService kpiService;
 
-    public PeopleServedIngestService(KpiMonthlyRepository kpiRepo) {
-        this.kpiRepo = kpiRepo;
+    public PeopleServedIngestService(KpiService kpiService) {
+        this.kpiService = kpiService;
     }
 
     /**
-     * 한 조직(org)에 대해 특정 월(ym)의 3개 지표를 upsert.
-     *
-     * @return 저장(신규 insert)된 레코드 개수
+     * 월별 맵(YYYY-MM -> 값)을 한 번에 적재.
+     * metric 파라미터를 받는 형태를 유지(이전 호출부 호환)하되, 기본값은 PEOPLE_SERVED_COUNT.
      */
-    public int ingest(Organization org,
-                      YearMonth ym,
-                      Long peopleServed,
-                      Long volunteerHours,
-                      BigDecimal communityDonationMatchKrw,
-                      String source,
-                      String note) {
+    public int ingestMonthlyMap(Long orgId,
+                                Long projectId,
+                                Map<String, BigDecimal> periodYmToValue,
+                                KpiMetric metric,
+                                String source,
+                                boolean approved) {
 
-        int saved = 0;
-        if (peopleServed != null) {
-            saved += upsertLong(org, KpiMonthly.Metric.PEOPLE_SERVED_COUNT, ym, peopleServed, source, note) ? 1 : 0;
+        Objects.requireNonNull(orgId, "orgId");
+        if (metric == null) metric = KpiMetric.PEOPLE_SERVED_COUNT;
+
+        int ok = 0;
+        if (periodYmToValue == null || periodYmToValue.isEmpty()) {
+            log.info("[people-served] no data to ingest (orgId={})", orgId);
+            return 0;
         }
-        if (volunteerHours != null) {
-            saved += upsertLong(org, KpiMonthly.Metric.VOLUNTEER_HOURS, ym, volunteerHours, source, note) ? 1 : 0;
-        }
-        if (communityDonationMatchKrw != null) {
-            saved += upsertDecimal(org, KpiMonthly.Metric.COMMUNITY_DONATION_MATCH_KRW, ym, communityDonationMatchKrw, source, note) ? 1 : 0;
-        }
-        log.info("[ingest][PUBLIC] orgId={} ym={} inserted={}", org.getId(), ym, saved);
-        return saved;
-    }
 
-    private boolean upsertLong(Organization org,
-                               KpiMonthly.Metric metric,
-                               YearMonth ym,
-                               Long value,
-                               String source,
-                               String note) {
-
-        Optional<KpiMonthly> existing = kpiRepo.findByOrganizationAndMetricAndYearAndMonth(
-                org, metric, ym.getYear(), ym.getMonthValue());
-
-        if (existing.isPresent()) {
-            var k = existing.get();
-            if (k.getLongValue() == null || !k.getLongValue().equals(value)
-                    || different(k.getSource(), source) || different(k.getNote(), note)) {
-                k.setLongValue(value);
-                k.setSource(source);
-                k.setNote(note);
-                kpiRepo.save(k);
+        for (Map.Entry<String, BigDecimal> e : periodYmToValue.entrySet()) {
+            String ym = normalizeYm(e.getKey());
+            BigDecimal v = safeNonNull(e.getValue());
+            try {
+                upsert(orgId, projectId, ym, metric, v, source, approved);
+                ok++;
+            } catch (Exception ex) {
+                log.warn("[people-served] upsert failed orgId={} ym={} v={} cause={}",
+                        orgId, ym, v, ex.toString());
             }
-            return false; // 신규 insert 아님
-        } else {
-            var k = new KpiMonthly();
-            k.setOrganization(org);
-            k.setMetric(metric);
-            k.setYear(ym.getYear());
-            k.setMonth(ym.getMonthValue());
-            k.setLongValue(value);
-            k.setSource(source);
-            k.setNote(note);
-            kpiRepo.save(k);
-            return true; // 신규 insert
+        }
+        log.info("[people-served] ingested {} rows (orgId={})", ok, orgId);
+        return ok;
+    }
+
+    /**
+     * 개별 월 레코드 적재 (호출부 호환용 시그니처).
+     * 이전에는 KpiMonthly.Metric metric 이었으나 지금은 KpiMetric 으로 변경.
+     */
+    public void upsert(Long orgId,
+                       Long projectId,
+                       String periodYm,
+                       KpiMetric metric,
+                       BigDecimal value,
+                       String source,
+                       boolean approved) {
+
+        if (metric == null) metric = KpiMetric.PEOPLE_SERVED_COUNT;
+        if (value == null) value = BigDecimal.ZERO;
+
+        String ym = normalizeYm(periodYm);
+        kpiService.upsertMonthly(orgId, projectId, ym, metric, value, source == null ? "PUBLIC_DATA" : source, approved);
+    }
+
+    /**
+     * 편의 오버로드: metric/source/approved 생략 시 기본값 사용.
+     */
+    public void upsert(Long orgId,
+                       Long projectId,
+                       String periodYm,
+                       BigDecimal value) {
+        upsert(orgId, projectId, periodYm, KpiMetric.PEOPLE_SERVED_COUNT, value, "PUBLIC_DATA", true);
+    }
+
+    // ---------- helpers ----------
+
+    private String normalizeYm(String input) {
+        if (input == null || input.isBlank()) {
+            return LocalDate.now().format(YM);
+        }
+        String s = input.trim();
+        // 허용: "YYYY-MM" 또는 "YYYYMM"
+        if (s.matches("\\d{4}-\\d{2}")) {
+            return s;
+        }
+        if (s.matches("\\d{6}")) {
+            return s.substring(0, 4) + "-" + s.substring(4, 6);
+        }
+        // 기타 포맷은 LocalDate 파싱 시도(첫날로 가정)
+        try {
+            LocalDate d = LocalDate.parse(s);
+            return d.format(YM);
+        } catch (Exception ignore) {
+            log.warn("[people-served] invalid periodYm '{}', fallback to current month", s);
+            return LocalDate.now().format(YM);
         }
     }
 
-    private boolean upsertDecimal(Organization org,
-                                  KpiMonthly.Metric metric,
-                                  YearMonth ym,
-                                  BigDecimal value,
-                                  String source,
-                                  String note) {
-
-        Optional<KpiMonthly> existing = kpiRepo.findByOrganizationAndMetricAndYearAndMonth(
-                org, metric, ym.getYear(), ym.getMonthValue());
-
-        if (existing.isPresent()) {
-            var k = existing.get();
-            if (k.getDecimalValue() == null || k.getDecimalValue().compareTo(value) != 0
-                    || different(k.getSource(), source) || different(k.getNote(), note)) {
-                k.setDecimalValue(value);
-                k.setSource(source);
-                k.setNote(note);
-                kpiRepo.save(k);
-            }
-            return false;
-        } else {
-            var k = new KpiMonthly();
-            k.setOrganization(org);
-            k.setMetric(metric);
-            k.setYear(ym.getYear());
-            k.setMonth(ym.getMonthValue());
-            k.setDecimalValue(value);
-            k.setSource(source);
-            k.setNote(note);
-            kpiRepo.save(k);
-            return true;
-        }
-    }
-
-    private static boolean different(String a, String b) {
-        if (a == null && b == null) return false;
-        if (a == null || b == null) return true;
-        return !a.equals(b);
+    private BigDecimal safeNonNull(BigDecimal v) {
+        return v == null ? BigDecimal.ZERO : v;
     }
 }

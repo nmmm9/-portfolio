@@ -1,6 +1,10 @@
 package com.impacttracker.backend.ingest.dart;
 
 import com.impacttracker.backend.config.OpendartProps;
+import io.netty.channel.ChannelOption;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.timeout.ReadTimeoutHandler;
+import io.netty.handler.timeout.WriteTimeoutHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -8,15 +12,26 @@ import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.netty.http.client.HttpClient;
 import reactor.util.retry.Retry;
 
+import javax.net.ssl.SSLException;
 import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.ByteArrayInputStream;
+import java.io.EOFException;
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
-import java.util.*;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
@@ -29,85 +44,143 @@ public class CorpCodeDownloader {
 
     private final OpendartProps props;
     private final WebClient web;
+    private final Path cacheZip;
+    private final Duration cacheTtl = Duration.ofDays(7);
 
     public CorpCodeDownloader(OpendartProps props) {
         this.props = props;
+        System.setProperty("java.net.preferIPv4Stack", "true");
 
         ExchangeStrategies strategies = ExchangeStrategies.builder()
-                .codecs(c -> c.defaultCodecs().maxInMemorySize(10 * 1024 * 1024)) // 10MB
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
                 .build();
 
-        // 타임아웃/커넥션 설정
         HttpClient httpClient = HttpClient.create()
-                .responseTimeout(Duration.ofSeconds(30));
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10_000)
+                .responseTimeout(Duration.ofSeconds(20))
+                .secure(ssl -> {
+                    try {
+                        ssl.sslContext(SslContextBuilder.forClient().protocols("TLSv1.2").build());
+                    } catch (SSLException e) {
+                        throw new RuntimeException(e);
+                    }
+                })
+                .compress(false)
+                .doOnConnected(conn -> conn
+                        .addHandlerLast(new ReadTimeoutHandler(30, TimeUnit.SECONDS))
+                        .addHandlerLast(new WriteTimeoutHandler(30, TimeUnit.SECONDS)));
 
         this.web = WebClient.builder()
                 .baseUrl(props.getBaseUrl())
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .exchangeStrategies(strategies)
                 .build();
+
+        this.cacheZip = Path.of(System.getProperty("user.home"), ".sit", "corpCode.zip");
+        try { Files.createDirectories(this.cacheZip.getParent()); } catch (IOException ignored) {}
     }
 
-    /** 전체 기업코드 ZIP/XML 파싱 (ZIP/직접 XML 모두 지원) */
     public List<Corp> downloadAllCorps() {
         String urlPath = "/api/corpCode.xml";
         log.info("[corpCode] downloading from {} ...", props.getBaseUrl() + urlPath);
 
-        byte[] body = web.get()
-                .uri(uri -> uri.path(urlPath)
-                        .queryParam("crtfc_key", props.getApiKey())
-                        .build())
-                .accept(MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_XML, MediaType.ALL)
-                .retrieve()
-                .bodyToMono(byte[].class)
-                .timeout(Duration.ofSeconds(35))
-                // Conn reset/타임아웃 등에 대해 백오프 재시도
-                .retryWhen(
-                        Retry.backoff(3, Duration.ofSeconds(2))
-                                .maxBackoff(Duration.ofSeconds(15))
-                                .filter(ex -> isTransient(ex))
-                )
-                .block();
+        byte[] body = null;
+        try {
+            body = web.get()
+                    .uri(uri -> uri.path(urlPath)
+                            .queryParam("crtfc_key", props.getApiKey())
+                            .build())
+                    .accept(MediaType.APPLICATION_OCTET_STREAM, MediaType.APPLICATION_XML, MediaType.ALL)
+                    .retrieve()
+                    .bodyToMono(byte[].class)
+                    .timeout(Duration.ofSeconds(40))
+                    .retryWhen(Retry.backoff(3, Duration.ofSeconds(2))
+                            .maxBackoff(Duration.ofSeconds(15))
+                            .filter(this::isTransient)
+                            .doBeforeRetry(sig -> log.warn("[corpCode] retry {}/3 due to: {}",
+                                    sig.totalRetries() + 1,
+                                    String.valueOf(sig.failure()))))
+                    .block();
+        } catch (Throwable t) {
+            log.warn("[corpCode] download error: {}", t.toString());
+        }
 
         if (body == null || body.length == 0) {
-            throw new RuntimeException("Failed to download/parse corpCode.xml: empty body");
+            byte[] cached = readCacheIfFresh();
+            if (cached != null) {
+                log.warn("[corpCode] using cached ZIP due to download failure: {}", cacheZip);
+                return parseFromBytes(cached);
+            }
+            throw new RuntimeException("Failed to download corpCode.xml and no usable cache");
         }
 
-        // magic check
         if (isZip(body)) {
-            log.debug("[corpCode] received ZIP ({} bytes)", body.length);
-            byte[] xml = unzipSingle(body, "CORPCODE.xml"); // 공식 명칭(대문자) 기준
-            if (xml == null) {
-                // 혹시 대소문자 다른 경우를 모두 탐색
-                xml = unzipByAnyXml(body);
-            }
-            if (xml == null) {
-                throw new RuntimeException("Failed to download/parse corpCode.xml: CORPCODE.xml not found in zip");
-            }
-            return parseCorpXml(xml);
+            writeCache(body);
+            return parseFromBytes(body);
         } else if (startsWithXml(body)) {
-            log.debug("[corpCode] received XML ({} bytes)", body.length);
-            return parseCorpXml(body);
+            return parseFromBytes(body);
         } else {
-            // HTML 안내문(키오류/쿼터초과) 등일 수 있음
             String head = new String(body, 0, Math.min(body.length, 300), StandardCharsets.UTF_8);
-            throw new RuntimeException("Failed to download/parse corpCode.xml: unexpected response head: " +
-                    head.replaceAll("\\s+"," ").trim());
+            byte[] cached = readCacheIfFresh();
+            if (cached != null) {
+                log.warn("[corpCode] unexpected response, falling back to cache. head={}", head.replaceAll("\\s+"," ").trim());
+                return parseFromBytes(cached);
+            }
+            throw new RuntimeException("Unexpected response head: " + head.replaceAll("\\s+"," ").trim());
         }
+    }
+
+    private List<Corp> parseFromBytes(byte[] bytes) {
+        if (isZip(bytes)) {
+            byte[] xml = unzipSingle(bytes, "CORPCODE.xml");
+            if (xml == null) xml = unzipByAnyXml(bytes);
+            if (xml == null) throw new RuntimeException("CORPCODE.xml not found in zip");
+            return parseCorpXml(xml);
+        }
+        return parseCorpXml(bytes);
+    }
+
+    private void writeCache(byte[] zipBytes) {
+        try {
+            Files.write(cacheZip, zipBytes);
+        } catch (IOException e) {
+            log.warn("[corpCode] cache write failed: {}", e.toString());
+        }
+    }
+
+    private byte[] readCacheIfFresh() {
+        try {
+            if (Files.exists(cacheZip)) {
+                Instant mtime = Files.getLastModifiedTime(cacheZip).toInstant();
+                if (Instant.now().minus(cacheTtl).isBefore(mtime)) {
+                    return Files.readAllBytes(cacheZip);
+                }
+            }
+        } catch (IOException ignored) {}
+        return null;
     }
 
     private boolean isTransient(Throwable ex) {
-        // 네트워크 오류/타임아웃 계열은 재시도
+        if (ex instanceof WebClientResponseException wcre) {
+            int s = wcre.getStatusCode().value();
+            if (s >= 400 && s < 500 && s != 408) return false;
+        }
         return ex instanceof java.net.SocketException
-                || ex instanceof java.io.IOException
-                || ex instanceof java.util.concurrent.TimeoutException
+                || ex instanceof SSLException
+                || ex instanceof EOFException
+                || ex instanceof IOException
+                || ex instanceof TimeoutException
                 || ex.getClass().getName().contains("Timeout")
-                || ex.getClass().getName().contains("Connection");
+                || ex.getClass().getName().contains("Connection")
+                || ex.getClass().getName().contains("Channel")
+                || ex.getClass().getName().contains("Ssl")
+                || ex.getClass().getName().contains("Handshake");
     }
 
     private boolean isZip(byte[] body) {
-        return body.length >= 2 && (body[0] == 0x50 && body[1] == 0x4B); // 'P''K'
+        return body.length >= 2 && (body[0] == 0x50 && body[1] == 0x4B);
     }
+
     private boolean startsWithXml(byte[] body) {
         String s = new String(body, 0, Math.min(body.length, 5), StandardCharsets.UTF_8);
         return s.startsWith("<?xml") || s.startsWith("<");

@@ -1,223 +1,206 @@
+// src/main/java/com/impacttracker/backend/ingest/dart/DartApiClient.java
 package com.impacttracker.backend.ingest.dart;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.impacttracker.backend.config.OpendartProps;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StopWatch;
-import org.springframework.web.reactive.function.client.ExchangeStrategies;
+import org.springframework.util.StringUtils;
+import org.springframework.web.reactive.function.client.ClientRequest;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.netty.http.client.HttpClient;
 import reactor.util.retry.Retry;
 
-import java.nio.charset.StandardCharsets;
+import io.netty.channel.ChannelOption;
+import io.netty.handler.timeout.ReadTimeoutHandler;
+import io.netty.handler.timeout.WriteTimeoutHandler;
+
+import java.net.URI;
 import java.time.Duration;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
-import java.util.function.Supplier;
+import java.util.concurrent.TimeUnit;
 
+@Slf4j
 @Component
 public class DartApiClient {
 
-    private static final Logger log = LoggerFactory.getLogger(DartApiClient.class);
-
-    private final OpendartProps props;
     private final WebClient web;
-    private final ObjectMapper om;
+    private final String apiKey;
+    private final ObjectMapper om = new ObjectMapper();
 
-    private static final int PAGE_COUNT = 100;
+    public DartApiClient(OpendartProps props, WebClient.Builder builder) {
+        this.apiKey = props.getApiKey();
 
-    public DartApiClient(OpendartProps props) {
-        this.props = props;
+        HttpClient httpClient = HttpClient.create()
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10_000)
+                .responseTimeout(Duration.ofSeconds(40))
+                .compress(false)
+                .keepAlive(true)
+                .doOnConnected(conn -> conn
+                        .addHandlerLast(new ReadTimeoutHandler(40, TimeUnit.SECONDS))
+                        .addHandlerLast(new WriteTimeoutHandler(40, TimeUnit.SECONDS)));
 
-        ExchangeStrategies strategies = ExchangeStrategies.builder()
-                .codecs(c -> c.defaultCodecs().maxInMemorySize(10 * 1024 * 1024))
-                .build();
-
-        this.web = WebClient.builder()
+        this.web = builder
                 .baseUrl(props.getBaseUrl())
-                .exchangeStrategies(strategies)
+                .clientConnector(new ReactorClientHttpConnector(httpClient))
+                .filter((request, next) -> {
+                    String urlStr = request.url().toString();
+                    StringBuilder uriB = new StringBuilder(urlStr);
+                    if (StringUtils.hasText(apiKey) && !urlStr.contains("crtfc_key=")) {
+                        uriB.append(urlStr.contains("?") ? "&" : "?")
+                                .append("crtfc_key=").append(apiKey);
+                    }
+                    ClientRequest newReq = ClientRequest.from(request)
+                            .url(URI.create(uriB.toString()))
+                            .build();
+                    return next.exchange(newReq);
+                })
                 .build();
-
-        this.om = new ObjectMapper()
-                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     }
 
-    // 외부 모델
+    @Getter
+    @RequiredArgsConstructor
     public static class Report {
         private final String rcpNo;
         private final String reportName;
-        private final String rceptDate;
-        public Report(String rcpNo, String reportName, String rceptDate) {
-            this.rcpNo = rcpNo;
-            this.reportName = reportName;
-            this.rceptDate = rceptDate;
-        }
-        public String rcpNo() { return rcpNo; }
-        public String reportName() { return reportName; }
-        public String rceptDate() { return rceptDate; }
-        @Override public String toString() {
-            return "Report{rcpNo=" + rcpNo + ", name=" + reportName + ", rceptDt=" + rceptDate + "}";
-        }
     }
 
-    /** 지정 기업/연월의 보고서 목록 조회(list.json 페이징) */
     public List<Report> searchReports(String corpCode, YearMonth ym) {
-        String bgn = ym.atDay(1).format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
-        String end = ym.atEndOfMonth().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
-
         List<Report> out = new ArrayList<>();
-        int page = 1;
-        StopWatch sw = new StopWatch("dart-list-" + corpCode + "-" + ym);
+        if (!StringUtils.hasText(corpCode)) return out;
 
-        while (true) {
-            sw.start("page-" + page);
-            ListJsonResponse res = callListJson(corpCode, bgn, end, page, PAGE_COUNT);
-            sw.stop();
+        String yyyymm = ym.toString().replace("-", "");
+        String bgnDe  = yyyymm + "01";
+        String endDe  = yyyymm + String.format("%02d", ym.lengthOfMonth());
 
-            if (!"000".equals(res.status)) {
-                log.debug("[dart][list.json] corp={} ym={} status={} message={}", corpCode, ym, res.status, res.message);
-                break;
-            }
+        int pageNo = 1;
+        int pageCount = 100;
+        int safetyPageLimit = 10;
 
-            if (res.list == null || res.list.isEmpty()) break;
-
-            for (ListItem it : res.list) {
-                String nm = safe(it.report_nm);
-                if (isTargetReport(nm)) {
-                    out.add(new Report(it.rcept_no, nm, it.rcept_dt));
-                }
-            }
-
-            int total = parseIntSafe(res.total_count, 0);
-            int got = page * PAGE_COUNT;
-            if (got >= total) break;
-            page++;
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("[dart][list] corp={} ym={} -> {} hits ({} ms)",
-                    corpCode, ym, out.size(), sw.getTotalTimeMillis());
-        }
-        return out;
-    }
-
-    /** 문서 구조 XML(document.xml)을 그대로 문자열로 반환 */
-    public String fetchDocumentXml(String rcpNo) {
-        byte[] body = callBytesWithRetry(() ->
-                web.get()
-                        .uri(uri -> uri.path("/api/document.xml")
-                                .queryParam("crtfc_key", props.getApiKey())
-                                .queryParam("rcept_no", rcpNo)
-                                .build())
-                        .accept(MediaType.APPLICATION_XML)
-                        .retrieve()
-                        .bodyToMono(byte[].class)
-        );
-
-        if (body == null || body.length == 0) return "";
-        String head = new String(body, 0, Math.min(body.length, 100), StandardCharsets.UTF_8);
-        if (log.isDebugEnabled()) {
-            log.debug("[dart][document.xml] rcpNo={} head='{}...'", rcpNo, head.replaceAll("\\s+"," ").trim());
-        }
-        return new String(body, StandardCharsets.UTF_8);
-    }
-
-    // 내부: list.json 호출 + DTO
-    private ListJsonResponse callListJson(String corpCode, String bgnDe, String endDe, int pageNo, int pageCount) {
-        byte[] json = callBytesWithRetry(() ->
-                web.get()
-                        .uri(uri -> uri.path("/api/list.json")
-                                .queryParam("crtfc_key", props.getApiKey())
+        while (pageNo <= safetyPageLimit) {
+            final int pn = pageNo;
+            final int pc = pageCount;
+            try {
+                String json = web.get()
+                        .uri(b -> b.path("/api/list.json")
                                 .queryParam("corp_code", corpCode)
                                 .queryParam("bgn_de", bgnDe)
                                 .queryParam("end_de", endDe)
-                                .queryParam("page_no", pageNo)
-                                .queryParam("page_count", pageCount)
+                                .queryParam("page_no", pn)
+                                .queryParam("page_count", pc)
                                 .build())
                         .accept(MediaType.APPLICATION_JSON)
                         .retrieve()
-                        .bodyToMono(byte[].class)
-        );
+                        .bodyToMono(String.class)
+                        .timeout(Duration.ofSeconds(40))
+                        .retryWhen(Retry.backoff(5, Duration.ofSeconds(2))
+                                .maxBackoff(Duration.ofSeconds(20))
+                                .jitter(0.4)
+                                .filter(this::isTransient))
+                        .block();
 
-        if (json == null || json.length == 0) {
-            var r = new ListJsonResponse();
-            r.status = "999"; r.message = "empty response";
-            r.list = List.of(); r.total_count = "0";
-            return r;
+                if (json == null || json.isBlank()) {
+                    log.warn("[dart][list] empty response corp={} ym={} page={}", corpCode, ym, pn);
+                    break;
+                }
+
+                JsonNode root = om.readTree(json);
+                String status  = optText(root, "status");
+                String msg     = optText(root, "message");
+                int totalCount = optInt(root, "total_count", -1);
+                log.info("[dart][list] corp={} ym={} page={} status={} msg={} total={}",
+                        corpCode, ym, pn, status, msg, totalCount);
+
+                if ("020".equals(status)) {
+                    throw new DartQuotaExceededException("OpenDART quota exceeded: " + String.valueOf(msg));
+                }
+                if (!"000".equals(status)) {
+                    log.debug("[dart][list] non-OK status corp={} ym={} page={} status={} msg={}",
+                            corpCode, ym, pn, status, msg);
+                    break;
+                }
+
+                JsonNode list = root.get("list");
+                if (list == null || !list.isArray() || list.size() == 0) break;
+
+                for (JsonNode it : list) {
+                    String rceptNo  = optText(it, "rcept_no");
+                    String reportNm = optText(it, "report_nm");
+                    if (StringUtils.hasText(rceptNo) && StringUtils.hasText(reportNm)) {
+                        out.add(new Report(rceptNo, reportNm));
+                    }
+                }
+
+                int gotSoFar = pn * pc;
+                if (totalCount >= 0 && gotSoFar >= totalCount) break;
+                pageNo++;
+            } catch (DartQuotaExceededException q) {
+                throw q; // 전체 중단 신호
+            } catch (Exception e) {
+                // ★ 트랜지언트면 예외로 올려서 상위에서 재시도
+                if (isTransient(e)) {
+                    throw new DartTransientException("Transient list.json error: " + e, e);
+                }
+                log.warn("[dart][list] request failed corp={} ym={} page={} cause={}",
+                        corpCode, ym, pn, e.toString());
+                break;
+            }
         }
 
+        log.debug("[dart][list] corp={} ym={} => {} reports", corpCode, ym, out.size());
+        return out;
+    }
+
+    public String fetchDocumentXml(String rcpNo) {
+        if (!StringUtils.hasText(rcpNo)) return null;
         try {
-            String s = new String(json, StandardCharsets.UTF_8);
-            return om.readValue(s, ListJsonResponse.class);
-        } catch (Exception ex) {
-            String head = new String(json, 0, Math.min(json.length, 200), StandardCharsets.UTF_8);
-            log.warn("[dart][list.json] parse fail corp={} page={} head='{}'", corpCode, pageNo, head.replaceAll("\\s+"," "));
-            var r = new ListJsonResponse();
-            r.status = "998"; r.message = "parse error: " + ex.getMessage();
-            r.list = List.of(); r.total_count = "0";
-            return r;
-        }
-    }
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    static class ListJsonResponse {
-        public String status;
-        public String message;
-        public String page_no;
-        public String total_count;
-        public List<ListItem> list;
-    }
-
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    static class ListItem {
-        public String corp_code;
-        public String corp_name;
-        public String stock_code;
-        public String rcept_no;
-        public String rcept_dt;
-        @JsonProperty("report_nm")
-        public String report_nm;
-        public String flr_nm;
-        public String rm;
-    }
-
-    // 유틸/필터
-    private boolean isTargetReport(String name) {
-        if (name == null) return false;
-        String s = name.toLowerCase(Locale.ROOT);
-        if (s.contains("사업보고서")) return true;
-        if (s.contains("반기보고서")) return true;
-        if (s.contains("분기보고서")) return true;
-        if (s.contains("지속가능") || s.contains("sustainability")) return true;
-        if (s.contains("esg")) return true;
-        if (s.contains("csr")) return true;
-        if (s.contains("사회공헌")) return true;
-        if (s.contains("기부")) return true;
-        if (s.contains("후원")) return true;
-        return false;
-    }
-
-    private static int parseIntSafe(String s, int def) {
-        try { return Integer.parseInt(s); } catch (Exception e) { return def; }
-    }
-    private static String safe(String s) { return s == null ? "" : s; }
-
-    private byte[] callBytesWithRetry(Supplier<reactor.core.publisher.Mono<byte[]>> supplier) {
-        try {
-            return supplier.get()
-                    .retryWhen(Retry.backoff(3, Duration.ofMillis(300))
-                            .maxBackoff(Duration.ofSeconds(3)))
-                    .block(Duration.ofSeconds(30));
-        } catch (Exception ex) {
-            log.warn("[dart] request failed: {}", ex.toString());
+            return web.get()
+                    .uri(b -> b.path("/api/document.xml").queryParam("rcept_no", rcpNo).build())
+                    .accept(MediaType.APPLICATION_XML, MediaType.ALL)
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .timeout(Duration.ofSeconds(40))
+                    .retryWhen(Retry.backoff(5, Duration.ofSeconds(2))
+                            .maxBackoff(Duration.ofSeconds(20))
+                            .jitter(0.4)
+                            .filter(this::isTransient))
+                    .block();
+        } catch (Exception e) {
+            if (isTransient(e)) {
+                throw new DartTransientException("Transient document.xml error: " + e, e);
+            }
+            log.warn("[dart][doc] fetchDocumentXml failed rcpNo={} cause={}", rcpNo, e.toString());
             return null;
         }
+    }
+
+    private boolean isTransient(Throwable ex) {
+        String n = ex.getClass().getName();
+        return n.contains("Timeout")
+                || n.contains("Connection")
+                || n.contains("Channel")
+                || n.contains("Ssl")
+                || n.contains("Handshake")
+                || ex instanceof java.net.SocketException
+                || ex instanceof java.io.EOFException
+                || ex instanceof java.io.IOException;
+    }
+
+    private static String optText(JsonNode node, String field) {
+        if (node == null) return null;
+        JsonNode v = node.get(field);
+        return v == null || v.isNull() ? null : v.asText();
+    }
+    private static int optInt(JsonNode node, String field, int def) {
+        if (node == null) return def;
+        JsonNode v = node.get(field);
+        return v == null || v.isNull() ? def : v.asInt(def);
     }
 }

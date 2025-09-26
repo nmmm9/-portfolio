@@ -1,20 +1,20 @@
 package com.impacttracker.backend.domain;
 
 import jakarta.persistence.*;
+import java.time.Instant;
 
 @Entity
+@Table(name = "project")
 public class Project {
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-
-    @ManyToOne(optional=false) @JoinColumn(name="organization_id")
-    private Organization organization;
-
-    @Column(nullable=false) private String name;
-    @Enumerated(EnumType.STRING)
-    private Category category = Category.OTHER;
+    private Long orgId;
+    private String name;
+    private String category;
     private String region;
+    @Column(columnDefinition = "text")
+    private String description;
+    private Instant createdAt;
 
-    public enum Category { ENVIRONMENT, EDUCATION, CHILDREN, OTHER }
     // getters/setters
 }

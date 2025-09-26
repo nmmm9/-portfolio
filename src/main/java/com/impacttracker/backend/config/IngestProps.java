@@ -1,5 +1,7 @@
 package com.impacttracker.backend.config;
 
+import lombok.Getter;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
@@ -15,13 +17,17 @@ import java.util.List;
  *     months-back: 0
  *     parallelism: 2
  */
+@Getter
+@Setter
 @Configuration
 @ConfigurationProperties(prefix = "impacttracker.ingest")
 public class IngestProps {
 
     private boolean onStartup = true;
     private int monthsBack = 0;     // 테스트는 0(이번달만)
-    private int parallelism = 2;    // 동시 수집 스레드 수(너무 크게 올리지 말기)
+    private int parallelism = 1;    // 동시 수집 스레드 수(너무 크게 올리지 말기)
+    private int maxTargets = 10; // ★ 추가: 대상 기업 상한
+
 
     // (전사 자동수집이면 corp 목록을 쓰지 않지만, 확장성을 위해 남겨둠)
     private List<Corp> corps;
