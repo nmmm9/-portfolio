@@ -1,4 +1,3 @@
-// src/main/java/com/impacttracker/backend/ingest/IngestOrchestrator.java
 package com.impacttracker.backend.ingest;
 
 import com.impacttracker.backend.config.IngestProps;
@@ -10,17 +9,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import java.time.YearMonth;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.time.Year;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -35,7 +26,6 @@ public class IngestOrchestrator {
     private final DartIngestService dartService;
     private final IngestProps props;
 
-    // ★ 쿼터 히트 시 모든 남은 태스크 중단 신호
     private static final AtomicBoolean QUOTA_HIT = new AtomicBoolean(false);
 
     public IngestOrchestrator(CorpCodeDownloader corpCodeDownloader,
@@ -49,90 +39,121 @@ public class IngestOrchestrator {
     }
 
     public void runOnStartupBlocking() {
-        runOnStartupBlocking(props != null ? props.getMonthsBack() : 0, defaultParallelism());
+        runOnStartupBlocking(props != null ? props.getYearsBack() : 3, defaultParallelism());
     }
 
-    public void runOnStartupBlocking(int monthsBack, int parallelism) {
+    public void runOnStartupBlocking(int yearsBack, int parallelism) {
         try {
-            log.info("[ingest] [startup] begin monthsBack={} parallelism={}", monthsBack, parallelism);
+            log.info("[ingest] 🚀 [startup] begin yearsBack={} parallelism={}", yearsBack, parallelism);
+
             List<CorpCodeDownloader.Corp> corps = corpCodeDownloader.downloadAllCorps();
-            upsertOrganizationsInBatches(corps, 1000);
-            backfillAllListed(monthsBack, parallelism);
-            log.info("[ingest] [startup] done");
+            log.info("[ingest] 📥 downloaded {} corps", corps.size());
+
+            // 상장사만 필터링
+            List<CorpCodeDownloader.Corp> listedCorps = corps.stream()
+                    .filter(c -> c.stockCode() != null && !c.stockCode().isBlank())
+                    .toList();
+            log.info("[ingest] 🏢 filtered {} listed companies", listedCorps.size());
+
+            // DB에 상장사만 저장
+            upsertOrganizationsInBatches(listedCorps, 1000);
+
+            // 연도별 수집
+            backfillAllListed(yearsBack, parallelism);
+
+            log.info("[ingest] ✅ [startup] done");
         } catch (Exception e) {
-            log.error("[ingest] startup fatal", e);
+            log.error("[ingest] ❌ startup fatal", e);
             throw e;
         }
     }
 
-    /** 기존 공개 엔트리 (monthsBack만 지정) */
-    public void backfillAllListed(int monthsBack) {
+    public void backfillAllListed(int yearsBack) {
         int p = (props != null && props.getParallelism() > 0) ? props.getParallelism() : defaultParallelism();
-        backfillAllListed(monthsBack, p);
+        backfillAllListed(yearsBack, p);
     }
 
-    /** 병렬도까지 지정하는 버전 (쿼터 가드 적용) */
-    public void backfillAllListed(int monthsBack, int parallelism) {
-        QUOTA_HIT.set(false); // 매 실행마다 초기화
+    /**
+     * 연도별 재무제표 수집
+     */
+    public void backfillAllListed(int yearsBack, int parallelism) {
+        QUOTA_HIT.set(false);
 
-        List<Organization> all = orgRepo.findAllDartEnabled(); // ※ 이 메서드는 상장사만 반환하도록 수정되어 있어야 함
+        List<Organization> all = orgRepo.findAllDartEnabled();
         if (all == null || all.isEmpty()) {
             log.info("[ingest] no DART-enabled organizations");
             return;
         }
-        if (monthsBack < 0) monthsBack = 0;
+
+        if (yearsBack < 0) yearsBack = 3;
         if (parallelism <= 0) parallelism = defaultParallelism();
 
-        // 대상 기업 상한(기본: 무제한)
-        int cap = parseInt(System.getProperty("ingest.maxTargets"), Integer.MAX_VALUE);
+        int maxTargets = props != null ? props.getMaxTargets() : 50;
+
+        // 상장사 중 대기업 우선
         List<Organization> targets = all.stream()
                 .filter(o -> o.getCorpCode() != null && !o.getCorpCode().isBlank())
-                .sorted(Comparator.comparing(Organization::getId))
-                .limit(cap)
+                .filter(o -> o.getStockCode() != null && !o.getStockCode().isBlank())
+                .sorted(Comparator.comparingInt(this::getCorporateRank)
+                        .thenComparing(Organization::getName))
+                .limit(maxTargets)
                 .toList();
 
-        YearMonth now = YearMonth.now();
-        List<YearMonth> months = new ArrayList<>(monthsBack + 1);
-        for (int i = 0; i <= monthsBack; i++) {
-            months.add(now.minusMonths(i));
+        if (targets.isEmpty()) {
+            log.warn("[ingest] no listed companies found");
+            return;
         }
 
-        // ★ 운영 팁: 보고서 많은 달(3, 8, 11)을 우선 처리 (원하면 -Dingest.preferReportMonths=false 로 끄기)
-        boolean preferHeavyMonths = Boolean.parseBoolean(System.getProperty("ingest.preferReportMonths", "true"));
-        if (preferHeavyMonths) {
-            months.sort(Comparator.comparingInt(IngestOrchestrator::monthPriority));
+        // 수집 대상 연도 목록
+        int currentYear = Year.now().getValue();
+        List<Integer> years = new ArrayList<>(yearsBack + 1);
+        for (int i = 0; i <= yearsBack; i++) {
+            years.add(currentYear - i);
         }
 
-        log.info("[ingest] targets capped {}/{} (limit={}), months={}",
-                targets.size(), all.size(), cap, months.size());
+        log.info("[ingest] 📋 targets={}/{} (limit={}), years={}, parallelism={}",
+                targets.size(), all.size(), maxTargets, years.size(), parallelism);
+
+        String targetNames = targets.stream()
+                .limit(10)
+                .map(Organization::getName)
+                .collect(Collectors.joining(", "));
+        log.info("[ingest] 🎯 companies: [{}{}]",
+                targetNames, targets.size() > 10 ? ", ..." : "");
 
         ExecutorService pool = Executors.newFixedThreadPool(parallelism);
         try {
             List<Callable<Integer>> tasks = new ArrayList<>();
+
+            // 각 기업 × 각 연도
             for (Organization org : targets) {
                 String corpCode = org.getCorpCode();
-                for (YearMonth ym : months) {
+                for (Integer year : years) {
                     tasks.add(() -> {
-                        if (QUOTA_HIT.get()) return 0; // 쿼터 초과 이후 즉시 중단
+                        if (QUOTA_HIT.get()) return 0;
 
                         try {
-                            int sleepMs = parseInt(System.getProperty("ingest.sleepMs"), 600);
-                            long jitter = (long)(Math.random() * 300); // +0~300ms
-                            try { Thread.sleep(sleepMs + jitter); } catch (InterruptedException ignored) {}                            return dartService.ingestDonationForCorp(corpCode, org, ym);
+                            // 요청 간 간격
+                            Thread.sleep(200 + (long)(Math.random() * 100));
+
+                            return dartService.ingestDonationForYear(corpCode, org, year);
                         } catch (DartQuotaExceededException q) {
                             QUOTA_HIT.set(true);
-                            log.warn("[ingest][quota] OpenDART quota exceeded. Halting remaining tasks.");
+                            log.warn("[ingest][quota] ⚠️ OpenDART quota exceeded");
                             return 0;
                         } catch (Exception ex) {
-                            log.warn("[ingest][DART] skip corp={} ym={} cause={}", corpCode, ym, ex.toString());
-                            try { Thread.sleep(800L); } catch (InterruptedException ignored) {}
+                            log.warn("[ingest] ⚠️ skip corp={} year={} cause={}",
+                                    corpCode, year, ex.toString());
+                            try { Thread.sleep(300L); } catch (InterruptedException ignored) {}
                             return 0;
                         }
                     });
                 }
             }
 
+            log.info("[ingest] 🔄 submitting {} tasks...", tasks.size());
             List<Future<Integer>> futures = pool.invokeAll(tasks);
+
             int ingested = 0;
             for (Future<Integer> f : futures) {
                 try {
@@ -142,7 +163,9 @@ public class IngestOrchestrator {
                     log.warn("[ingest] task failed: {}", e.toString());
                 }
             }
-            log.info("[ingest] backfill done, new rows ingested={} quotaHit={}", ingested, QUOTA_HIT.get());
+
+            log.info("[ingest] ✅ backfill done, new rows ingested={} quotaHit={}",
+                    ingested, QUOTA_HIT.get());
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             log.error("[ingest] interrupted", ie);
@@ -162,15 +185,30 @@ public class IngestOrchestrator {
         }
     }
 
-    private static int monthPriority(YearMonth ym) {
-        int m = ym.getMonthValue();
-        if (m == 3)  return 0; // 사업보고서
-        if (m == 8)  return 1; // 반기
-        if (m == 11) return 2; // 3분기
-        return 9;
-    }
+    private int getCorporateRank(Organization org) {
+        String name = org.getName();
+        if (name == null) return 999;
 
-    /* ========= 조직 업서트(기존 로직 유지) ========= */
+        if (name.contains("삼성")) return 1;
+        if (name.contains("LG")) return 2;
+        if (name.contains("현대")) return 3;
+        if (name.contains("SK")) return 4;
+        if (name.contains("롯데")) return 10;
+        if (name.contains("포스코") || name.contains("POSCO")) return 11;
+        if (name.contains("한화")) return 12;
+        if (name.contains("GS")) return 13;
+        if (name.contains("신세계")) return 14;
+        if (name.contains("CJ")) return 15;
+        if (name.contains("은행")) return 20;
+        if (name.contains("증권")) return 21;
+        if (name.contains("생명") || name.contains("손해보험")) return 22;
+        if (name.contains("전자")) return 30;
+        if (name.contains("자동차")) return 31;
+        if (name.contains("화학")) return 32;
+        if (name.contains("건설")) return 33;
+
+        return 100;
+    }
 
     public void upsertOrganizationsInBatches(List<CorpCodeDownloader.Corp> corps, int batchSize) {
         if (corps == null || corps.isEmpty()) {
@@ -185,7 +223,7 @@ public class IngestOrchestrator {
 
         List<String> allCodes = new ArrayList<>(byCorp.keySet());
         int total = allCodes.size();
-        log.info("[ingest][startup] corpCode unique size={}", total);
+        log.info("[ingest][startup] 📊 corpCode unique size={}", total);
 
         AtomicInteger inserted = new AtomicInteger();
         AtomicInteger updated  = new AtomicInteger();
@@ -212,30 +250,36 @@ public class IngestOrchestrator {
                     inserted.incrementAndGet();
                 } else {
                     boolean dirty = false;
-                    if (row.corpName() != null && !row.corpName().equals(o.getName())) { o.setName(row.corpName()); dirty = true; }
-                    if (row.stockCode() != null && !row.stockCode().equals(o.getStockCode())) { o.setStockCode(row.stockCode()); dirty = true; }
-                    if (dirty) { toSave.add(o); updated.incrementAndGet(); }
+                    if (row.corpName() != null && !row.corpName().equals(o.getName())) {
+                        o.setName(row.corpName());
+                        dirty = true;
+                    }
+                    if (row.stockCode() != null && !row.stockCode().equals(o.getStockCode())) {
+                        o.setStockCode(row.stockCode());
+                        dirty = true;
+                    }
+                    if (dirty) {
+                        toSave.add(o);
+                        updated.incrementAndGet();
+                    }
                 }
             }
+
             if (!toSave.isEmpty()) orgRepo.saveAll(toSave);
+
             int done = processed.addAndGet(sliceCodes.size());
             if (done % 10000 == 0 || end == total) {
-                log.info("[ingest][startup] org upsert progress done={} / total={}, inserted={}, updated={}",
+                log.info("[ingest][startup] org upsert progress done={}/{}, inserted={}, updated={}",
                         done, total, inserted.get(), updated.get());
             }
         }
-        log.info("[ingest][startup] corpCode sync: inserted={} updated={}", inserted.get(), updated.get());
+        log.info("[ingest][startup] ✅ corpCode sync: inserted={} updated={}",
+                inserted.get(), updated.get());
     }
 
     private int defaultParallelism() {
-        int cpu = Math.max(2, Runtime.getRuntime().availableProcessors());
-        if (props == null) return 1; // 운영 팁: 기본 1로 낮춰 쿼터 보호
+        if (props == null) return 2;
         int p = props.getParallelism();
-        return (p > 0) ? p : 1;
-    }
-
-    private int parseInt(String s, int defV) {
-        if (s == null) return defV;
-        try { return Integer.parseInt(s.trim()); } catch (Exception ignore) { return defV; }
+        return (p > 0) ? p : 2;
     }
 }

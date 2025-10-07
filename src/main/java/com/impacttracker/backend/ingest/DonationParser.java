@@ -1,4 +1,3 @@
-// src/main/java/com/impacttracker/backend/ingest/DonationParser.java
 package com.impacttracker.backend.ingest;
 
 import org.slf4j.Logger;
@@ -24,7 +23,7 @@ public class DonationParser {
     private static final Logger log = LoggerFactory.getLogger(DonationParser.class);
 
     /** 키워드 주변(앞뒤)에서만 숫자 스캔 (오탐 감소) */
-    private static final int WINDOW_RADIUS = 600;
+    private static final int WINDOW_RADIUS = 1200;  // 600 → 1200으로 확대
 
     /** 비정상 큰 값(오탐) 컷오프: 1,000조원(= 1e15 KRW) 초과면 폐기 */
     private static final BigDecimal HARD_MAX = new BigDecimal("1000000000000000");
@@ -36,10 +35,23 @@ public class DonationParser {
 
     /** 신호 키워드(있을 때만 스캔 허용) */
     private static final String[] SIGNAL_KEYWORDS = new String[]{
+            // 기부 관련
             "기부", "기부금", "기부 활동", "기부활동", "기부금품",
-            "후원", "후원금", "협찬",
+            // 후원 관련
+            "후원", "후원금", "협찬", "찬조",
+            // 사회공헌 관련
             "사회공헌", "사회 공헌", "사회공헌활동", "사회 공헌 활동",
-            "출연금", "장학금", "성금", "기탁"
+            "사회공헌비", "사회공헌비용", "공익", "공익사업",
+            // 출연/지원 관련
+            "출연금", "출연", "지원금", "지원", "무상지원",
+            // 장학/복지 관련
+            "장학금", "장학", "성금", "기탁", "기탁금",
+            "복지", "복지비용", "복지사업",
+            // 회계 항목
+            "기타비용", "기타영업외비용", "영업외비용",
+            "판매비와관리비", "판관비",
+            // ESG/CSR
+            "ESG", "CSR", "지속가능경영"
     };
 
     /**
@@ -75,7 +87,10 @@ public class DonationParser {
         return best;
     }
 
-    /** 연월이 추가로 들어오는 오버로드(현재는 동일 처리) */
+    /**
+     * 연월이 추가로 들어오는 오버로드
+     * (현재는 ym 파라미터를 사용하지 않지만, 호환성을 위해 유지)
+     */
     public BigDecimal extractDonationAmount(String xmlOrText, YearMonth ym) {
         return extractDonationAmount(xmlOrText);
     }

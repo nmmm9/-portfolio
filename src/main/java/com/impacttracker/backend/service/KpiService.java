@@ -4,6 +4,8 @@ import com.impacttracker.backend.domain.KpiMetric;
 import com.impacttracker.backend.domain.KpiMonthly;
 import com.impacttracker.backend.repo.KpiMonthlyRepository;
 import com.impacttracker.backend.repo.KpiSubmissionRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -16,6 +18,8 @@ import java.util.Map;
 
 @Service
 public class KpiService {
+    private static final Logger log = LoggerFactory.getLogger(KpiService.class);
+
     private final KpiMonthlyRepository monthlyRepo;
     private final KpiSubmissionRepository submissionRepo;
 
@@ -61,9 +65,9 @@ public class KpiService {
     public void upsertMonthly(Long orgId, Long projectId, String periodYm, KpiMetric metric,
                               BigDecimal value, String source, boolean approved) {
         if (value == null) value = BigDecimal.ZERO;
-        if (periodYm != null && periodYm.contains("-")) {
-            periodYm = periodYm.replace("-", ""); // yyyyMM 강제
-        }
+
+        // ★ periodYm 정규화 (yyyyMM 또는 yyyy-MM → yyyyMM로 통일)
+        periodYm = normalizePeriodYm(periodYm);
 
         KpiMonthly target = null;
 
@@ -81,6 +85,13 @@ public class KpiService {
                     .orElse(null);
         }
 
+        // 3) 여전히 못 찾으면 (orgId, metric, periodYm)만으로 찾기
+        if (target == null) {
+            target = monthlyRepo
+                    .findByOrgIdAndMetricAndPeriodYm(orgId, metric, periodYm)
+                    .orElse(null);
+        }
+
         if (target == null) {
             // INSERT
             KpiMonthly k = new KpiMonthly();
@@ -92,15 +103,65 @@ public class KpiService {
             k.setSource(source);
             k.setApproved(approved);
             monthlyRepo.save(k);
+            log.info("[KPI] ✅ inserted orgId={} metric={} ym={} value={} source={}",
+                    orgId, metric, periodYm, value, source);
         } else {
-            // UPDATE (덮어쓰기)
-            target.setProjectId(projectId);
-            target.setValue(value);
-            target.setApproved(approved);
-            if (source != null && !source.isBlank()) {
-                target.setSource(source); // 기존 source가 빈 값이면 갱신
+            // UPDATE (변경된 경우만)
+            boolean changed = false;
+
+            if (!value.equals(target.getValue())) {
+                target.setValue(value);
+                changed = true;
             }
-            monthlyRepo.save(target);
+
+            if (projectId != null && !projectId.equals(target.getProjectId())) {
+                target.setProjectId(projectId);
+                changed = true;
+            }
+
+            if (source != null && !source.equals(target.getSource())) {
+                target.setSource(source);
+                changed = true;
+            }
+
+            if (approved != target.isApproved()) {
+                target.setApproved(approved);
+                changed = true;
+            }
+
+            if (changed) {
+                monthlyRepo.save(target);
+                log.info("[KPI] 🔄 updated id={} orgId={} metric={} ym={} value={} source={}",
+                        target.getId(), orgId, metric, periodYm, value, source);
+            } else {
+                log.debug("[KPI] ⏭️ skipped (no change) orgId={} metric={} ym={}",
+                        orgId, metric, periodYm);
+            }
         }
+    }
+
+    /**
+     * periodYm 정규화: yyyyMM 형식으로 통일
+     */
+    private String normalizePeriodYm(String ym) {
+        if (ym == null || ym.isBlank()) {
+            return LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMM"));
+        }
+
+        String s = ym.trim();
+
+        // yyyy-MM → yyyyMM
+        if (s.matches("\\d{4}-\\d{2}")) {
+            return s.replace("-", "");
+        }
+
+        // yyyyMM → 그대로
+        if (s.matches("\\d{6}")) {
+            return s;
+        }
+
+        // 기타 형식 → 현재 월로 폴백
+        log.warn("[KPI] invalid periodYm '{}', fallback to current month", s);
+        return LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMM"));
     }
 }

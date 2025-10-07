@@ -5,15 +5,12 @@ spring:
   task:
     scheduling:
       enabled: false
-  codec:
-    max-in-memory-size: 10MB
   datasource:
-    url: jdbc:mysql://127.0.0.1:3306/sit?serverTimezone=Asia/Seoul&useSSL=false&allowPublicKeyRetrieval=true&useUnicode=true&characterEncoding=utf8
+    url: jdbc:mysql://127.0.0.1:3306/sit?serverTimezone=Asia/Seoul&useSSL=false&allowPublicKeyRetrieval=true
     username: root
     password: 1234
     hikari:
       connection-timeout: 5000
-      initialization-fail-timeout: 0
       minimum-idle: 1
       maximum-pool-size: 5
 
@@ -22,37 +19,52 @@ spring:
       ddl-auto: update
     properties:
       hibernate:
-        # Hibernate 6에서는 dialect 지정이 필요없고, MySQL8Dialect 경고가 떠서 명시 제거 권장
-        # dialect: org.hibernate.dialect.MySQLDialect
         format_sql: true
         jdbc.time_zone: Asia/Seoul
-        order_inserts: true
-        order_updates: true
-        generate_statistics: false
-        jdbc:
-          batch_size: 1000
 
 logging:
   level:
-    org.hibernate.SQL: debug
-    org.hibernate.orm.jdbc.bind: trace
-    org.springframework.jdbc.core.JdbcTemplate: debug
-    org.springframework.jdbc.core.StatementCreatorUtils: trace
-    reactor.netty.http.client.HttpClientConnect: ERROR  # Connection reset 도배 방지
+    com.impacttracker.backend.ingest: DEBUG  # ← INFO → DEBUG
+    com.impacttracker.backend.ingest.dart.DartApiClient: DEBUG
     com.impacttracker.backend.ingest.DartIngestService: DEBUG
-    com.impacttracker.backend.ingest.DonationParser: DEBUG
-    com.impacttracker.backend.ingest.dart: INFO
-
 
 impacttracker:
-  ingest:
-    on-startup: false
-    startup-enabled: false
-    months-back: 0
-    parallelism: 1       # ← 네트워크 불안정/429 피하려고 일단 1로 낮춤
-    max-targets: 10      # DART 대상 기업 상위 10개만(새 옵션)
-    dev-seed:
+  crawler:
+    enabled: true
+    user-agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    timeout-ms: 10000
+    delay-between-requests-ms: 2000
+    max-retries: 3
+    max-concurrent-requests: 5
+
+    targets:
+      - name: "DART"
+        base-url: "https://dart.fss.or.kr"
+        enabled: true
+        timeout-ms: 15000
+        selector: "table.table-list"
+
+      - name: "ESG"
+        base-url: "https://esg.krx.co.kr"
+        enabled: false
+        timeout-ms: 10000
+
+      - name: "NEWS"
+        base-url: "https://search.naver.com"
+        enabled: true
+        timeout-ms: 8000
+
+    rate-limiting:
+      enabled: true
+      requests-per-minute: 30
+      requests-per-hour: 1000
+
+    proxy:
       enabled: false
+      # host: "proxy.example.com"
+      # port: 8080
+      # username: ""
+      # password: ""
 
 opendart:
   base-url: "https://opendart.fss.or.kr"

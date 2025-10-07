@@ -9,8 +9,12 @@ import java.time.Instant;
         name = "kpi_monthly",
         uniqueConstraints = @UniqueConstraint(
                 name = "uq_kpi_monthly",
-                columnNames = {"orgId","projectId","periodYm","metric"}
-        )
+                columnNames = {"org_id","project_id","period_ym","metric"}
+        ),
+        indexes = {
+                @Index(name = "idx_kpi_org_metric", columnList = "org_id,metric"),
+                @Index(name = "idx_kpi_period", columnList = "period_ym")
+        }
 )
 public class KpiMonthly {
 
@@ -19,14 +23,15 @@ public class KpiMonthly {
     private Long id;
 
     /** organization.id */
-    @Column(nullable = false)
+    @Column(name = "org_id", nullable = false)
     private Long orgId;
 
     /** nullable: 프로젝트 단위 집계용 */
+    @Column(name = "project_id")
     private Long projectId;
 
-    /** YYYY-MM */
-    @Column(length = 7, nullable = false)
+    /** YYYYMM 또는 YYYY-MM */
+    @Column(name = "period_ym", length = 7, nullable = false)
     private String periodYm;
 
     @Enumerated(EnumType.STRING)
@@ -43,6 +48,7 @@ public class KpiMonthly {
     @Column(nullable = false)
     private boolean approved = true;
 
+    @Column(name = "created_at")
     private Instant createdAt = Instant.now();
 
     // ---------- getters / setters ----------

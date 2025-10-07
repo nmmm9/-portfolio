@@ -36,7 +36,6 @@ public class AdminIngestController {
         this.props = props;
     }
 
-    /** 간단 헬스체크 */
     @GetMapping("/ping")
     public Map<String, Object> ping() {
         return Map.of(
@@ -46,12 +45,11 @@ public class AdminIngestController {
                 "lastStartedAt", lastStartedAt.get(),
                 "lastFinishedAt", lastFinishedAt.get(),
                 "profileOnStartup", props.isOnStartup(),
-                "monthsBackDefault", props.getMonthsBack(),
+                "yearsBackDefault", props.getYearsBack(),
                 "parallelismDefault", props.getParallelism()
         );
     }
 
-    /** 현재 DB 대략 통계 */
     @GetMapping("/stats")
     public Map<String, Object> stats() {
         long orgs = orgRepo.count();
@@ -62,52 +60,49 @@ public class AdminIngestController {
         );
     }
 
-    /** 즉시 1회 실행 (동기) — 앱 기본 동작과 동일한 경로 */
     @PostMapping("/run-now")
-    public Map<String, Object> runNow(@RequestParam(defaultValue = "-1") Integer monthsBack,
+    public Map<String, Object> runNow(@RequestParam(defaultValue = "-1") Integer yearsBack,
                                       @RequestParam(defaultValue = "-1") Integer parallelism) {
         if (!running.compareAndSet(false, true)) {
             return Map.of("ok", false, "message", "another job is running");
         }
         try {
-            int mb = (monthsBack == null || monthsBack < 0) ? props.getMonthsBack() : monthsBack;
+            int yb = (yearsBack == null || yearsBack < 0) ? props.getYearsBack() : yearsBack;
             int pl = (parallelism == null || parallelism < 1) ? props.getParallelism() : parallelism;
 
             lastJob.set("run-now");
             lastStartedAt.set(Instant.now());
-            orchestrator.runOnStartupBlocking(mb, pl);
+            orchestrator.runOnStartupBlocking(yb, pl);
             lastFinishedAt.set(Instant.now());
-            return Map.of("ok", true, "monthsBack", mb, "parallelism", pl);
+            return Map.of("ok", true, "yearsBack", yb, "parallelism", pl);
         } finally {
             running.set(false);
         }
     }
 
-    /** 백필 시작 (비동기) — 과거 N개월 ~ 현재까지 상장사 전수 */
-    @PostMapping("/backfill/{months}")
+    @PostMapping("/backfill/{years}")
     @ResponseStatus(HttpStatus.ACCEPTED)
-    public Map<String, Object> backfill(@PathVariable int months) {
+    public Map<String, Object> backfill(@PathVariable int years) {
         if (!running.compareAndSet(false, true)) {
             return Map.of("ok", false, "message", "another job is running");
         }
-        lastJob.set("backfill:" + months);
+        lastJob.set("backfill:" + years);
         lastStartedAt.set(Instant.now());
 
         new Thread(() -> {
             try {
-                orchestrator.backfillAllListed(months);
+                orchestrator.backfillAllListed(years);
                 lastFinishedAt.set(Instant.now());
             } catch (Exception ignore) {
                 lastFinishedAt.set(Instant.now());
             } finally {
                 running.set(false);
             }
-        }, "admin-backfill-" + months).start();
+        }, "admin-backfill-" + years).start();
 
-        return Map.of("ok", true, "accepted", true, "months", months);
+        return Map.of("ok", true, "accepted", true, "years", years);
     }
 
-    /** 실행 중인지 확인 */
     @GetMapping("/running")
     public Map<String, Object> running() {
         return Map.of("running", running.get(), "lastJob", lastJob.get());

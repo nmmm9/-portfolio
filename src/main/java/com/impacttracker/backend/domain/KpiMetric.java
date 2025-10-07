@@ -1,8 +1,11 @@
+// src/main/java/com/impacttracker/backend/domain/KpiMetric.java
 package com.impacttracker.backend.domain;
 
 public enum KpiMetric {
     CO2E_REDUCED_TON,
-    VOLUNTEER_HOURS,
     DONATION_AMOUNT_KRW,
-    PEOPLE_SERVED_COUNT
+    SPONSORSHIP_AMOUNT_KRW,
+    CSR_EXPENSE_KRW,
+    PEOPLE_SERVED_COUNT,
+    VOLUNTEER_HOURS
 }

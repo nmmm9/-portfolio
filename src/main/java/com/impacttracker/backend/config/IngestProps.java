@@ -7,16 +7,6 @@ import org.springframework.context.annotation.Configuration;
 
 import java.util.List;
 
-/**
- * application.yml / application-*.yml 의 impacttracker.ingest.* 바인딩
- *
- * 예)
- * impacttracker:
- *   ingest:
- *     on-startup: true
- *     months-back: 0
- *     parallelism: 2
- */
 @Getter
 @Setter
 @Configuration
@@ -24,14 +14,11 @@ import java.util.List;
 public class IngestProps {
 
     private boolean onStartup = true;
-    private int monthsBack = 0;     // 테스트는 0(이번달만)
-    private int parallelism = 1;    // 동시 수집 스레드 수(너무 크게 올리지 말기)
-    private int maxTargets = 10; // ★ 추가: 대상 기업 상한
+    private int yearsBack = 3;      // ← 이름 변경! (monthsBack → yearsBack)
+    private int parallelism = 2;
+    private int maxTargets = 50;
 
-
-    // (전사 자동수집이면 corp 목록을 쓰지 않지만, 확장성을 위해 남겨둠)
     private List<Corp> corps;
-
     private PublicData publicData = new PublicData();
 
     // --- nested types ---
@@ -69,11 +56,14 @@ public class IngestProps {
     public boolean isOnStartup() { return onStartup; }
     public void setOnStartup(boolean onStartup) { this.onStartup = onStartup; }
 
-    public int getMonthsBack() { return monthsBack; }
-    public void setMonthsBack(int monthsBack) { this.monthsBack = monthsBack; }
+    public int getYearsBack() { return yearsBack; }
+    public void setYearsBack(int yearsBack) { this.yearsBack = yearsBack; }
 
     public int getParallelism() { return parallelism; }
     public void setParallelism(int parallelism) { this.parallelism = parallelism; }
+
+    public int getMaxTargets() { return maxTargets; }
+    public void setMaxTargets(int maxTargets) { this.maxTargets = maxTargets; }
 
     public List<Corp> getCorps() { return corps; }
     public void setCorps(List<Corp> corps) { this.corps = corps; }

@@ -1,6 +1,6 @@
 spring:
   profiles:
-    active: dev           # 기본으로 dev 프로필 사용(원하면 제거하고 실행시 지정해도 됨)
+    active: dev           # ← dev 프로필 활성화
   main:
     lazy-initialization: true
     allow-bean-definition-overriding: true
