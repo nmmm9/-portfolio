@@ -1,0 +1,23 @@
+# ESG RAG Chatbot - Minimum Dependencies
+# Only RAG functionality from original project
+
+# OpenAI API
+openai>=1.30.0
+
+# Environment variables
+python-dotenv==1.0.0
+
+# Vector database - try older version
+chromadb==0.3.29
+
+# Korean embedding model
+sentence-transformers==2.3.1
+
+# Compatible transformers version
+transformers==4.36.2
+
+# Cross-encoder reranking
+torch==2.1.2
+
+# NumPy dependency
+numpy==1.24.3
