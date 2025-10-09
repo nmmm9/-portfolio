@@ -1,12 +1,91 @@
 spring:
-  profiles:
-    active: dev           # ← dev 프로필 활성화
-  main:
-    lazy-initialization: true
-    allow-bean-definition-overriding: true
-  jackson:
-    time-zone: Asia/Seoul
+  application:
+    name: Social Impact Tracker
 
+  # 데이터베이스 설정
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/social_impact_db?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=UTF-8&serverTimezone=Asia/Seoul
+    username: root
+    password: 1234
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  # JPA 설정
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: true
+        show_sql: false
+    open-in-view: false
+
+  # JSON 직렬화 설정
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    time-zone: Asia/Seoul
+    date-format: yyyy-MM-dd'T'HH:mm:ss
+
+# 서버 설정
+server:
+  port: 8080
+  servlet:
+    context-path: /
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+# OpenDart API 설정
 opendart:
   base-url: https://opendart.fss.or.kr
-  api-key: ${OPENDART_API_KEY:}   # 환경변수 주입(없으면 빈값). dev에서 override됨.
+  api-key: ${DART_API_KEY}
+  http:
+    connect-timeout-ms: 10000
+    read-timeout-ms: 30000
+    retry:
+      max-attempts: 3
+      backoff-ms: 1000
+
+# 데이터 수집 설정
+ingest:
+  on-startup: true # 시작 시 자동 수집 비활성화 (이미 PowerShell로 저장됨)
+  parallelism: 2
+  donation:
+    on-startup: false  # DART 데이터는 이미 저장되어 있음
+    from-year: 2023
+    to-year: 2024
+    consolidated: true
+
+# ESG 및 기타 API 설정 (필요시 사용)
+api:
+  esg:
+    key: ${ESG_API_KEY:}
+  meal:
+    key: ${MEAL_API_KEY:}
+  kosis:
+    key: ${KOSIS_API_KEY:}
+
+# 로깅 설정
+logging:
+  level:
+    com.socialimpact.tracker: DEBUG
+    org.springframework.web: INFO
+    org.hibernate.SQL: debug
+    org.hibernate.orm.jdbc.bind: trace
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/social-impact-tracker.log
+
+# 스케줄러 설정
+spring.task.scheduling.pool.size: 5
+
+# CORS 설정
+cors:
+  allowed-origins: "*"
+  allowed-methods: "GET,POST,PUT,DELETE,OPTIONS"
+  allowed-headers: "*"
+  max-age: 3600
