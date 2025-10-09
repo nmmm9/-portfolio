@@ -50,11 +50,11 @@ opendart:
 
 # 데이터 수집 설정
 ingest:
-  on-startup: true # 시작 시 자동 수집 비활성화 (이미 PowerShell로 저장됨)
+  on-startup: false # 시작 시 자동 수집 비활성화 (이미 PowerShell로 저장됨)
   parallelism: 2
   donation:
     on-startup: false  # DART 데이터는 이미 저장되어 있음
-    from-year: 2023
+    from-year: 2021
     to-year: 2024
     consolidated: true
 

@@ -36,10 +36,11 @@ import java.util.zip.ZipInputStream;
 public class DartCollectorService {
 
     private final WebClient.Builder webClientBuilder;
-    private final OrganizationRepository organizationRepository;
-    private final ProjectRepository projectRepository;
-    private final KpiRepository kpiRepository;
-    private final KpiReportRepository kpiReportRepository;
+    public final OrganizationRepository organizationRepository;
+    public final ProjectRepository projectRepository;
+    public final KpiRepository kpiRepository;
+    public final KpiReportRepository kpiReportRepository;
+
 
     @Value("${opendart.api-key}")
     private String dartApiKey;
@@ -232,6 +233,8 @@ public class DartCollectorService {
     private boolean collectDonationForYear(WebClient webClient, ObjectMapper mapper,
                                            String corpCode, Organization org, int year) {
         try {
+            // ⭐ 연도별 공시 검색 (제출일 기준)
+            // 2024년 = 2024년 1월 ~ 12월에 제출된 공시
             String bgnDe = year + "0101";
             String endDe = year + "1231";
 
@@ -252,18 +255,38 @@ public class DartCollectorService {
             JsonNode reports = listRoot.path("list");
 
             if (!reports.isArray() || reports.size() == 0) {
+                log.debug("❌ No reports found for {} in {}", corpCode, year);
                 return false;
             }
 
+            log.debug("📊 Found {} reports for year {}", reports.size(), year);
+
             for (JsonNode report : reports) {
                 String reportNm = report.path("report_nm").asText();
+
+                // ⭐ 사업보고서만 처리
                 if (reportNm.contains("사업보고서")) {
                     String rceptNo = report.path("rcept_no").asText();
+                    String rceptDt = report.path("rcept_dt").asText();
+
+                    log.debug("📄 Processing report: {} (접수일: {})", reportNm, rceptDt);
 
                     BigDecimal donationAmount = extractDonationAmountFromReport(webClient, rceptNo);
 
                     if (donationAmount != null && donationAmount.compareTo(BigDecimal.ZERO) > 0) {
-                        saveKpiReport(org, donationAmount, year);
+                        // ⭐ 사업보고서의 '사업연도'를 추출 (예: "사업보고서 (2023.12)" → 2023)
+                        int businessYear = year - 1; // 일반적으로 전년도 데이터
+
+                        // 보고서명에서 연도 추출 시도
+                        if (reportNm.matches(".*\\((\\d{4})\\..*")) {
+                            String yearStr = reportNm.replaceAll(".*\\((\\d{4})\\..*", "$1");
+                            businessYear = Integer.parseInt(yearStr);
+                        }
+
+                        log.info("✅ {} (사업연도: {}): {} 원",
+                                org.getName(), businessYear, donationAmount);
+
+                        saveKpiReport(org, donationAmount, businessYear);
                         return true;
                     }
                 }
@@ -272,12 +295,16 @@ public class DartCollectorService {
             return false;
 
         } catch (Exception e) {
+            log.error("❌ Error collecting data for {} year {}: {}", corpCode, year, e.getMessage());
             return false;
         }
     }
 
+
     private BigDecimal extractDonationAmountFromReport(WebClient webClient, String rceptNo) {
         try {
+            log.info("📄 Fetching report document: {}", rceptNo);
+
             String documentHtml = webClient.get()
                     .uri(uriBuilder -> uriBuilder
                             .path("/api/document.xml")
@@ -288,34 +315,92 @@ public class DartCollectorService {
                     .bodyToMono(String.class)
                     .block();
 
+            if (documentHtml == null || documentHtml.isEmpty()) {
+                log.warn("❌ Empty document for {}", rceptNo);
+                return null;
+            }
+
+            log.info("📄 Document size: {} bytes", documentHtml.length());
+
+            // ⭐ "기부금" 텍스트 포함 여부 확인
+            if (documentHtml.contains("기부금")) {
+                log.info("✅ Document contains '기부금' keyword");
+
+                // "기부금" 근처 텍스트 출력
+                int idx = documentHtml.indexOf("기부금");
+                int start = Math.max(0, idx - 300);
+                int end = Math.min(documentHtml.length(), idx + 500);
+                String context = documentHtml.substring(start, end);
+
+                log.info("📝 Context around '기부금':\n{}", context);
+            } else {
+                log.warn("❌ Document does NOT contain '기부금' keyword");
+            }
+
+            // ⭐ Jsoup으로 HTML 파싱
             Document doc = Jsoup.parse(documentHtml);
+
+            // 모든 테이블 찾기
             Elements tables = doc.select("table");
+            log.info("📊 Found {} tables in document", tables.size());
 
+            int tableIndex = 0;
             for (Element table : tables) {
+                tableIndex++;
+
                 Elements rows = table.select("tr");
-                for (Element row : rows) {
+
+                for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+                    Element row = rows.get(rowIndex);
                     Elements cells = row.select("td, th");
+
                     if (cells.size() >= 2) {
-                        String label = cells.get(0).text().toLowerCase();
+                        String firstCell = cells.get(0).text().trim();
+                        String secondCell = cells.get(1).text().trim();
 
-                        if (label.contains("기부금") || label.contains("사회공헌")) {
-                            String valueText = cells.get(1).text();
-                            String numericValue = valueText.replaceAll("[^0-9]", "");
+                        // "기부" 키워드 포함된 행 모두 출력
+                        if (firstCell.contains("기부") || firstCell.contains("사회공헌")) {
+                            log.info("🔍 Table #{}, Row #{}: '{}' = '{}'",
+                                    tableIndex, rowIndex, firstCell, secondCell);
 
-                            if (!numericValue.isEmpty()) {
-                                return new BigDecimal(numericValue);
+                            // 숫자 추출 시도
+                            String numericValue = secondCell.replaceAll("[^0-9]", "");
+
+                            if (!numericValue.isEmpty() && numericValue.length() >= 3) {
+                                try {
+                                    BigDecimal amount = new BigDecimal(numericValue);
+
+                                    // 백만원 단위로 변환
+                                    BigDecimal actualAmount = amount.multiply(BigDecimal.valueOf(1_000_000));
+
+                                    log.info("💰 Extracted number: {} → {} 백만원 → {} 원",
+                                            secondCell, amount, actualAmount);
+
+                                    // 1백만원 ~ 100조원 사이면 유효
+                                    if (actualAmount.compareTo(BigDecimal.valueOf(1_000_000L)) >= 0 &&
+                                            actualAmount.compareTo(BigDecimal.valueOf(100_000_000_000_000L)) <= 0) {
+
+                                        log.info("✅ VALID donation amount found!");
+                                        return actualAmount;
+                                    }
+                                } catch (NumberFormatException e) {
+                                    log.debug("⏭️  Number format error: {}", numericValue);
+                                }
                             }
                         }
                     }
                 }
             }
 
+            log.info("❌ No '기부금' data found in report {}", rceptNo);
             return null;
 
         } catch (Exception e) {
+            log.error("❌ Error extracting donation", e);
             return null;
         }
     }
+
 
     private Organization saveOrUpdateOrganization(String corpName, String stockCode) {
         return organizationRepository.findAll().stream()
@@ -379,6 +464,15 @@ public class DartCollectorService {
         log.info("⚙️  Parallelism: {} threads", parallelism);
 
         List<String> corpCodes = fetchAllCorpCodes();
+
+        // ⭐⭐⭐ 여기에 추가 ⭐⭐⭐
+        int SKIP_COUNT = 1615;
+        if (corpCodes.size() > SKIP_COUNT) {
+            log.info("⏩ Skipping first {} companies (already processed)", SKIP_COUNT);
+            corpCodes = corpCodes.subList(SKIP_COUNT, corpCodes.size());
+        }
+        // ⭐⭐⭐ 여기까지 ⭐⭐⭐
+
         totalCompanies.set(corpCodes.size());
 
         log.info("📊 Total companies to process: {}", totalCompanies.get());
