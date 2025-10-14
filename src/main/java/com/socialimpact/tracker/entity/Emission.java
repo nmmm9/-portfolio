@@ -19,31 +19,22 @@ public class Emission {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @JsonIgnore  // ⭐ JSON 직렬화 시 제외 (LazyInitializationException 방지)
+    @JsonIgnore
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "organization_id", nullable = false)
     private Organization organization;
 
     @Column(name = "organization_name", length = 200)
-    private String organizationName;  // 회사명 중복 저장 (조회 성능 향상)
+    private String organizationName;
 
     @Column(name = "gir_company_name", length = 200)
-    private String girCompanyName;  // GIR 엑셀의 원본 법인명
+    private String girCompanyName;
 
     @Column(nullable = false)
     private Integer year;
 
     @Column(name = "total_emissions", precision = 15, scale = 2)
     private BigDecimal totalEmissions;
-
-    @Column(name = "scope1", precision = 15, scale = 2)
-    private BigDecimal scope1;
-
-    @Column(name = "scope2", precision = 15, scale = 2)
-    private BigDecimal scope2;
-
-    @Column(name = "scope3", precision = 15, scale = 2)
-    private BigDecimal scope3;
 
     @Column(name = "energy_usage", precision = 15, scale = 2)
     private BigDecimal energyUsage;
@@ -63,5 +54,10 @@ public class Emission {
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
+    }
+
+    // organizationId getter 추가 (JSON 직렬화용)
+    public Long getOrganizationId() {
+        return organization != null ? organization.getId() : null;
     }
 }

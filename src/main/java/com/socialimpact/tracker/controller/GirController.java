@@ -1,7 +1,9 @@
 package com.socialimpact.tracker.controller;
 
 import com.socialimpact.tracker.entity.Emission;
+import com.socialimpact.tracker.entity.Organization;
 import com.socialimpact.tracker.repository.EmissionRepository;
+import com.socialimpact.tracker.repository.OrganizationRepository;
 import com.socialimpact.tracker.service.GirCollectorService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -11,6 +13,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Slf4j
 @RestController
@@ -21,6 +24,7 @@ public class GirController {
 
     private final GirCollectorService girCollectorService;
     private final EmissionRepository emissionRepository;
+    private final OrganizationRepository organizationRepository;
 
     /**
      * POST /api/emissions/upload
@@ -64,10 +68,9 @@ public class GirController {
     }
 
     /**
-     * GET /api/emissions?year=2024
-     * 연도별 배출량 조회
+     * GET /api/emissions?year=2024&orgId=1&fromYear=2020&toYear=2024
+     * 배출량 조회 (다양한 필터 지원)
      */
-    // 교체: year + orgId + fromYear + toYear 지원
     @GetMapping
     public ResponseEntity<List<Emission>> getEmissions(
             @RequestParam(required = false) Integer year,
@@ -75,16 +78,51 @@ public class GirController {
             @RequestParam(required = false, name = "fromYear") Integer fromYear,
             @RequestParam(required = false, name = "toYear") Integer toYear) {
 
+        log.info("🔍 Emissions query - year: {}, orgId: {}, fromYear: {}, toYear: {}",
+                year, orgId, fromYear, toYear);
+
         if (year != null && orgId == null && fromYear == null && toYear == null) {
-            // 기존 동작 유지 (year만 주어지면 기존 쿼리)
             return ResponseEntity.ok(emissionRepository.findByYear(year));
         }
-        // 그 외에는 범용 검색
+
         List<Emission> rows = emissionRepository.search(orgId, fromYear, toYear);
+        log.info("✅ Found {} emission records", rows.size());
         return ResponseEntity.ok(rows);
     }
 
+    /**
+     * GET /api/emissions/organizations
+     * 배출량 데이터가 있는 조직만 반환
+     */
+    @GetMapping("/organizations")
+    public ResponseEntity<List<Map<String, Object>>> getOrganizationsWithEmissions() {
+        log.info("🔍 Fetching organizations with emissions data");
 
+        // 배출량 데이터가 있는 조직 ID들을 가져옴
+        List<Long> orgIdsWithEmissions = emissionRepository.findAll()
+                .stream()
+                .map(e -> e.getOrganization().getId())
+                .distinct()
+                .collect(Collectors.toList());
+
+        log.info("✅ Found {} organizations with emission data", orgIdsWithEmissions.size());
+
+        // 해당 조직들의 정보를 가져옴
+        List<Organization> organizations = organizationRepository.findAllById(orgIdsWithEmissions);
+
+        // 간단한 Map 형태로 변환
+        List<Map<String, Object>> result = organizations.stream()
+                .map(org -> {
+                    Map<String, Object> map = new java.util.HashMap<>();
+                    map.put("id", org.getId());
+                    map.put("name", org.getName());
+                    map.put("type", org.getType() != null ? org.getType() : "");
+                    return map;
+                })
+                .collect(Collectors.toList());
+
+        return ResponseEntity.ok(result);
+    }
 
     /**
      * GET /api/emissions/top-emitters?year=2024&limit=10
@@ -126,55 +164,5 @@ public class GirController {
         emissionRepository.deleteAll();
         log.info("🗑️  Deleted {} emission records", count);
         return ResponseEntity.ok("Deleted " + count + " records");
-    }
-
-    /**
-     * GET /api/emissions/unmatched
-     * 매칭 실패한 GIR 법인명 목록 조회
-     */
-    @GetMapping("/unmatched")
-    public ResponseEntity<Map<String, Object>> getUnmatchedCompanies() {
-        // 이 API는 업로드 중 실패한 기업 목록을 보여주는 용도
-        // 실제로는 업로드 시 로그에 기록되므로, 여기서는 샘플 응답
-        return ResponseEntity.ok(Map.of(
-                "message", "Check server logs for unmatched companies during upload",
-                "tip", "매칭 실패한 기업은 업로드 응답의 errors 필드에서 확인 가능"
-        ));
-    }
-
-    /**
-     * GET /api/emissions/matching-preview?girName=에스케이텔레콤
-     * GIR 법인명으로 매칭될 Organization 미리보기
-     */
-    @GetMapping("/matching-preview")
-    public ResponseEntity<Map<String, Object>> previewMatching(
-            @RequestParam String girName) {
-
-        try {
-            // normalizeCompanyName 메서드 호출 테스트
-            String normalized = normalizeForTest(girName);
-
-            return ResponseEntity.ok(Map.of(
-                    "girName", girName,
-                    "normalized", normalized,
-                    "message", "매칭 로직이 이 이름으로 검색합니다"
-            ));
-        } catch (Exception e) {
-            return ResponseEntity.ok(Map.of(
-                    "error", e.getMessage()
-            ));
-        }
-    }
-
-    private String normalizeForTest(String name) {
-        String normalized = name;
-        normalized = normalized.replace("SK", "에스케이")
-                .replace("LG", "엘지")
-                .replace("KT", "케이티")
-                .replace("에스케이", "SK")
-                .replace("엘지", "LG")
-                .replace("케이티", "KT");
-        normalized = normalized.replaceAll("[\\s()㈜(주)주식회사]", "").toLowerCase();
-        return normalized;
     }
 }

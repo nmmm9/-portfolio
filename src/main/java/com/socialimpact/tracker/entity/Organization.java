@@ -1,5 +1,6 @@
 package com.socialimpact.tracker.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;  // ⭐ 추가
 import jakarta.persistence.*;
 import lombok.Data;
 import java.time.LocalDateTime;
@@ -22,6 +23,7 @@ public class Organization {
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
+    @JsonIgnore  // ⭐ 이 줄 추가
     @OneToMany(mappedBy = "organization", cascade = CascadeType.ALL)
     private List<Project> projects;
 
