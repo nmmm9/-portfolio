@@ -40,9 +40,11 @@ public class DonationController {
         // CSV 파일만 허용
         for (MultipartFile file : files) {
             String filename = file.getOriginalFilename();
-            if (filename == null || !filename.toLowerCase().endsWith(".csv")) {
+            if (filename == null ||
+                    (!filename.toLowerCase().endsWith(".csv") &&
+                            !filename.toLowerCase().endsWith(".txt"))) {
                 return ResponseEntity.badRequest()
-                        .body(Map.of("error", "CSV 파일만 업로드 가능합니다: " + filename));
+                        .body(Map.of("error", "CSV 또는 TXT 파일만 업로드 가능합니다: " + filename));
             }
         }
 

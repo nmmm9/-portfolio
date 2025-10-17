@@ -3,8 +3,10 @@ package com.socialimpact.tracker.service;
 import com.socialimpact.tracker.dto.*;
 import com.socialimpact.tracker.entity.KpiReport;
 import com.socialimpact.tracker.entity.KpiReport.ReportStatus;
+import com.socialimpact.tracker.repository.DonationRepository;
 import com.socialimpact.tracker.repository.KpiReportRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,6 +27,9 @@ public class DashboardService {
     /**
      * 대시보드 전체 요약 데이터 조회
      */
+    @Autowired
+    private DonationRepository donationRepository; // ← 추가
+
     public DashboardSummaryDTO getDashboardSummary() {
         List<KpiReport> approvedReports = kpiReportRepository.findByStatus(ReportStatus.APPROVED);
 

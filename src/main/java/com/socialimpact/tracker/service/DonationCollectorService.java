@@ -93,11 +93,14 @@ public class DonationCollectorService {
         loadOrganizationCache();
 
         try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
+                new InputStreamReader(file.getInputStream(), "EUC-KR"))) {
 
+            // 탭(Tab)으로 구분된 파일 지원
             CSVParser csvParser = new CSVParser(reader, CSVFormat.DEFAULT
                     .builder()
+                    .setDelimiter('\t')  // ← 탭 구분자 추가
                     .setHeader()
+                    .setAllowMissingColumnNames(true)  // ← 이 줄 추가
                     .setSkipHeaderRecord(true)
                     .setTrim(true)
                     .build());
@@ -140,7 +143,7 @@ public class DonationCollectorService {
 
                     // Donation 엔티티 생성 또는 업데이트
                     Donation donation = donationRepository
-                            .findByOrganizationIdAndYearAndQuarter(org.getId(), year, quarter)
+                            .findByOrganization_IdAndYearAndQuarter(org.getId(), year, quarter)
                             .orElse(new Donation());
 
                     if (donation.getId() == null) {
