@@ -58,14 +58,6 @@ ingest:
     to-year: 2024
     consolidated: true
 
-# ESG 및 기타 API 설정 (필요시 사용)
-api:
-  esg:
-    key: ${ESG_API_KEY:}
-  meal:
-    key: ${MEAL_API_KEY:}
-  kosis:
-    key: ${KOSIS_API_KEY:}
 
 # 로깅 설정 (콘솔에만 출력, 파일 생성 안 함)
 logging:
