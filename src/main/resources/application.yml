@@ -67,7 +67,7 @@ api:
   kosis:
     key: ${KOSIS_API_KEY:}
 
-# 로깅 설정
+# 로깅 설정 (콘솔에만 출력, 파일 생성 안 함)
 logging:
   level:
     com.socialimpact.tracker: DEBUG
@@ -76,9 +76,6 @@ logging:
     org.hibernate.orm.jdbc.bind: trace
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-  file:
-    name: logs/social-impact-tracker.log
 
 # 스케줄러 설정
 spring.task.scheduling.pool.size: 5

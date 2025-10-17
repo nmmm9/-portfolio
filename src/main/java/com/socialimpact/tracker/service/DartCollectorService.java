@@ -197,4 +197,125 @@ public class DartCollectorService {
 
         return (avgTimePerCompany * remaining) / 1000;
     }
+    /**
+     * 전체 상장사 기부금 수집
+     */
+    public void collectAllListedCompanies() {
+        if (isCollecting) {
+            log.warn("⚠️ 이미 수집 작업이 진행 중입니다!");
+            return;
+        }
+
+        isCollecting = true;
+        startTime = System.currentTimeMillis();
+        totalCompanies.set(0);
+        processedCompanies.set(0);
+        successCount.set(0);
+        failureCount.set(0);
+
+        try {
+            log.info("🚀 전체 상장사 기부금 수집 시작");
+
+            List<String> corpCodes = fetchAllCorpCodes();
+            totalCompanies.set(corpCodes.size());
+
+            for (String corpCode : corpCodes) {
+                collectDonationData(corpCode);
+                Thread.sleep(1000);
+            }
+
+            log.info("✅ 수집 완료! 성공: {}, 실패: {}", successCount.get(), failureCount.get());
+
+        } catch (Exception e) {
+            log.error("❌ 수집 작업 중 오류", e);
+        } finally {
+            isCollecting = false;
+        }
+    }
+
+    /**
+     * 특정 회사 기부금 수집
+     */
+    @Transactional
+    public void collectDonationData(String corpCode) {
+        try {
+            WebClient webClient = webClientBuilder.baseUrl(dartBaseUrl).build();
+            ObjectMapper mapper = new ObjectMapper();
+
+            String companyJson = webClient.get()
+                    .uri(uriBuilder -> uriBuilder
+                            .path("/api/company.json")
+                            .queryParam("crtfc_key", dartApiKey)
+                            .queryParam("corp_code", corpCode)
+                            .build())
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .block();
+
+            JsonNode companyInfo = mapper.readTree(companyJson);
+
+            if (!"000".equals(companyInfo.path("status").asText())) {
+                failureCount.incrementAndGet();
+                return;
+            }
+
+            String corpName = companyInfo.path("corp_name").asText();
+            log.info("[{}/{}] 처리 중: {}", processedCompanies.get() + 1, totalCompanies.get(), corpName);
+
+            Organization org = saveOrUpdateOrganization(corpName, companyInfo.path("stock_code").asText());
+
+            boolean hasData = false;
+            for (int year = fromYear; year <= toYear; year++) {
+                // 여기서 실제 기부금 수집 로직 (나중에 구현)
+                // 지금은 일단 구조만
+            }
+
+            if (hasData) {
+                successCount.incrementAndGet();
+            } else {
+                failureCount.incrementAndGet();
+            }
+
+        } catch (Exception e) {
+            log.error("❌ 처리 중 오류: {}", corpCode, e);
+            failureCount.incrementAndGet();
+        } finally {
+            processedCompanies.incrementAndGet();
+        }
+    }
+
+    private void saveKpiReport(Organization org, BigDecimal amount, int year) {
+        String projectName = org.getName() + " CSR " + year;
+        Project project = projectRepository.findAll().stream()
+                .filter(p -> p.getName().equals(projectName))
+                .findFirst()
+                .orElseGet(() -> {
+                    Project p = new Project();
+                    p.setOrganization(org);
+                    p.setName(projectName);
+                    p.setCategory("CSR");
+                    p.setStartDate(LocalDate.of(year, 1, 1));
+                    p.setEndDate(LocalDate.of(year, 12, 31));
+                    return projectRepository.save(p);
+                });
+
+        Kpi kpi = kpiRepository.findByName("Donation Amount")
+                .orElseGet(() -> {
+                    Kpi newKpi = new Kpi();
+                    newKpi.setName("Donation Amount");
+                    newKpi.setUnit("원");
+                    newKpi.setCategory("Finance");
+                    return kpiRepository.save(newKpi);
+                });
+
+        KpiReport report = new KpiReport();
+        report.setProject(project);
+        report.setKpi(kpi);
+        report.setValue(amount);
+        report.setReportDate(LocalDate.of(year, 12, 31));
+        report.setStatus(ReportStatus.APPROVED);
+        report.setApprovedBy("DART_AUTO");
+
+        kpiReportRepository.save(report);
+    }
 }
