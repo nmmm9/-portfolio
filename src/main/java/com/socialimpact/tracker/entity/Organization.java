@@ -20,16 +20,24 @@ public class Organization {
     @Column(length = 50)
     private String type;
 
-    // ⭐ DART API 용 corp_code 추가
+    // DART API corp_code
     @Column(name = "corp_code", length = 8)
     private String corpCode;
 
-    // ⭐ 종목코드 추가
+    // Stock code
     @Column(name = "stock_code", length = 6)
     private String stockCode;
 
-    @Column(name = "created_at")
+    // Industry field - CRITICAL: Must match DB column
+    @Column(length = 50)
+    private String industry;
+
+    @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
+
+    // Updated at field - CRITICAL: Must match DB column
+    @Column(name = "updated_at")
+    private LocalDateTime updatedAt;
 
     @JsonIgnore
     @OneToMany(mappedBy = "organization", cascade = CascadeType.ALL)
@@ -38,5 +46,11 @@ public class Organization {
     @PrePersist
     protected void onCreate() {
         createdAt = LocalDateTime.now();
+        updatedAt = LocalDateTime.now();
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        updatedAt = LocalDateTime.now();
     }
 }
