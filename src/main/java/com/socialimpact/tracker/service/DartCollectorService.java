@@ -14,8 +14,10 @@ import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
@@ -25,6 +27,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.ZipEntry;
@@ -40,6 +43,8 @@ public class DartCollectorService {
     public final ProjectRepository projectRepository;
     public final KpiRepository kpiRepository;
     public final KpiReportRepository kpiReportRepository;
+    private final DonationRepository donationRepository;
+
 
 
     @Value("${opendart.api-key}")
@@ -239,12 +244,14 @@ public class DartCollectorService {
     @Transactional
     public void collectDonationData(String corpCode) {
         try {
+            processedCompanies.incrementAndGet();
+
             WebClient webClient = webClientBuilder.baseUrl(dartBaseUrl).build();
             ObjectMapper mapper = new ObjectMapper();
 
+            // 1. 회사 정보
             String companyJson = webClient.get()
-                    .uri(uriBuilder -> uriBuilder
-                            .path("/api/company.json")
+                    .uri(ub -> ub.path("/api/company.json")
                             .queryParam("crtfc_key", dartApiKey)
                             .queryParam("corp_code", corpCode)
                             .build())
@@ -253,37 +260,218 @@ public class DartCollectorService {
                     .block();
 
             JsonNode companyInfo = mapper.readTree(companyJson);
-
             if (!"000".equals(companyInfo.path("status").asText())) {
                 failureCount.incrementAndGet();
                 return;
             }
 
             String corpName = companyInfo.path("corp_name").asText();
-            log.info("[{}/{}] 처리 중: {}", processedCompanies.get() + 1, totalCompanies.get(), corpName);
+            String stockCode = companyInfo.path("stock_code").asText();
 
-            Organization org = saveOrUpdateOrganization(corpName, companyInfo.path("stock_code").asText());
+            // 2. Organization 자동 생성
+            Organization org = organizationRepository.findAll().stream()
+                    .filter(o -> o.getName().equals(corpName))
+                    .findFirst()
+                    .orElseGet(() -> {
+                        Organization newOrg = new Organization();
+                        newOrg.setName(corpName);
+                        newOrg.setType("상장사");
+                        return organizationRepository.save(newOrg);
+                    });
 
-            boolean hasData = false;
+            boolean foundData = false;
+
+            // 3. 단일회사 재무제표 API로 기부금 조회
             for (int year = fromYear; year <= toYear; year++) {
-                // 여기서 실제 기부금 수집 로직 (나중에 구현)
-                // 지금은 일단 구조만
+                final int currentYear = year; // 람다용 final 변수
+                try {
+                    String fnlttJson = webClient.get()
+                            .uri(ub -> ub.path("/api/fnlttSinglAcnt.json")
+                                    .queryParam("crtfc_key", dartApiKey)
+                                    .queryParam("corp_code", corpCode)
+                                    .queryParam("bsns_year", String.valueOf(currentYear))
+                                    .queryParam("reprt_code", "11011") // 사업보고서
+                                    .build())
+                            .retrieve()
+                            .bodyToMono(String.class)
+                            .block();
+
+                    JsonNode fnlttData = mapper.readTree(fnlttJson);
+                    if (!"000".equals(fnlttData.path("status").asText())) {
+                        log.trace("  {}년 API 상태: {}", currentYear, fnlttData.path("message").asText());
+                        continue;
+                    }
+
+                    JsonNode list = fnlttData.path("list");
+                    if (!list.isArray() || list.size() == 0) {
+                        log.trace("  {}년 데이터 없음", currentYear);
+                        continue;
+                    }
+
+                    // 4. "기부금" 항목 찾기
+                    for (JsonNode item : list) {
+                        String accountNm = item.path("account_nm").asText();
+                        String accountId = item.path("account_id").asText();
+
+                        // dart_Donations 또는 항목명에 "기부금" 포함
+                        if (accountId.equals("dart_Donations") || accountNm.contains("기부금")) {
+                            // 당기 금액 우선, 없으면 전기
+                            String amountStr = item.path("thstrm_amount").asText();
+                            if (amountStr == null || amountStr.isEmpty() || amountStr.equals("-")) {
+                                amountStr = item.path("frmtrm_amount").asText();
+                            }
+                            if (amountStr == null || amountStr.isEmpty() || amountStr.equals("-")) {
+                                amountStr = item.path("bfefrmtrm_amount").asText(); // 전전기
+                            }
+
+                            if (amountStr != null && !amountStr.isEmpty()) {
+                                amountStr = amountStr.replaceAll("[^0-9-]", "");
+
+                                if (!amountStr.isEmpty() && !amountStr.equals("-")) {
+                                    BigDecimal amount = new BigDecimal(amountStr);
+
+                                    if (amount.compareTo(BigDecimal.ZERO) > 0) {
+                                        Donation donation = donationRepository
+                                                .findByOrganization_IdAndYearAndQuarter(org.getId(), currentYear, null)
+                                                .orElse(new Donation());
+
+                                        donation.setOrganization(org);
+                                        donation.setOrganizationName(corpName);
+                                        donation.setStockCode(stockCode);
+                                        donation.setYear(currentYear);
+                                        donation.setQuarter(null);
+                                        donation.setDonationAmount(amount);
+                                        donation.setDataSource("DART_API");
+                                        donation.setReportType("사업보고서");
+                                        donation.setVerificationStatus("자동수집");
+
+                                        donationRepository.save(donation);
+                                        foundData = true;
+
+                                        log.info("  ✅ {} {}년: {} 원 ({})",
+                                                corpName, currentYear, String.format("%,d", amount), accountNm);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Thread.sleep(200); // API 제한 방지
+
+                } catch (Exception e) {
+                    log.trace("  {}년 실패", currentYear);
+                }
             }
 
-            if (hasData) {
+            if (foundData) {
                 successCount.incrementAndGet();
             } else {
                 failureCount.incrementAndGet();
             }
 
         } catch (Exception e) {
-            log.error("❌ 처리 중 오류: {}", corpCode, e);
             failureCount.incrementAndGet();
-        } finally {
-            processedCompanies.incrementAndGet();
         }
     }
 
+    private BigDecimal parseXbrlForDonation(byte[] zipData) {
+        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
+            ZipEntry entry;
+
+            while ((entry = zis.getNextEntry()) != null) {
+                // 재무제표 XML 파일만 처리
+                if (!entry.getName().endsWith(".xml")) continue;
+
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                byte[] buffer = new byte[1024];
+                int len;
+                while ((len = zis.read(buffer)) > 0) {
+                    baos.write(buffer, 0, len);
+                }
+
+                String xmlContent = baos.toString("UTF-8");
+
+                // 기부금 관련 태그 검색
+                // XBRL 표준 태그: tuple_eng_donatio_expendtur_crt_trm_amount
+                if (xmlContent.contains("기부금") || xmlContent.contains("donatio")) {
+                    Document doc = Jsoup.parse(xmlContent, "", org.jsoup.parser.Parser.xmlParser());
+
+                    // 기부금 금액 추출 (여러 패턴 시도)
+                    String[] searchTags = {
+                            "tuple_eng_donatio_expendtur_crt_trm_amount", // 당기 기부금
+                            "donatio_expendtur_crt_trm_amount",
+                            "donation_amount"
+                    };
+
+                    for (String tag : searchTags) {
+                        Elements elements = doc.select(tag);
+                        if (!elements.isEmpty()) {
+                            String amountText = elements.first().text().replaceAll("[^0-9]", "");
+                            if (!amountText.isEmpty()) {
+                                return new BigDecimal(amountText);
+                            }
+                        }
+                    }
+
+                    // 태그로 못 찾으면 텍스트 패턴 검색
+                    String[] patterns = {"기부금.*?([0-9,]+)", "donatio.*?([0-9,]+)"};
+                    for (String pattern : patterns) {
+                        java.util.regex.Pattern p = java.util.regex.Pattern.compile(pattern);
+                        java.util.regex.Matcher m = p.matcher(xmlContent);
+                        if (m.find()) {
+                            String amountText = m.group(1).replaceAll(",", "");
+                            return new BigDecimal(amountText);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("XBRL 파싱 중 오류", e);
+        }
+
+        return null;
+    }
+
+    // API 테스트용 엔드포인트 추가
+    @GetMapping("/test-dart")
+    public ResponseEntity<Map<String, Object>> testDartConnection() {
+        try {
+            // 1. corpCodes.xml 다운로드 테스트
+            WebClient webClient = webClientBuilder.baseUrl(dartBaseUrl).build();
+            String corpCodesXml = webClient.get()
+                    .uri(ub -> ub.path("/api/corpCode.xml")
+                            .queryParam("crtfc_key", dartApiKey)
+                            .build())
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .block();
+
+            // 2. 삼성전자(005930) 테스트
+            String testCorpCode = "00126380"; // 삼성전자
+            String companyJson = webClient.get()
+                    .uri(ub -> ub.path("/api/company.json")
+                            .queryParam("crtfc_key", dartApiKey)
+                            .queryParam("corp_code", testCorpCode)
+                            .build())
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .block();
+
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "corpCodesAvailable", corpCodesXml != null && !corpCodesXml.isEmpty(),
+                    "samsungData", companyJson,
+                    "message", "DART API 연결 정상"
+            ));
+
+        } catch (Exception e) {
+            return ResponseEntity.status(500).body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()
+            ));
+        }
+    }
     private void saveKpiReport(Organization org, BigDecimal amount, int year) {
         String projectName = org.getName() + " CSR " + year;
         Project project = projectRepository.findAll().stream()
