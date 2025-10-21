@@ -34,7 +34,6 @@ public class EmploymentCollectorService {
     /**
      * 전체 상장사의 고용 현황 수집
      */
-    @Transactional
     public void collectAllEmployments(int year) {
         log.info("🚀 Starting employment data collection for year {}", year);
 
@@ -174,7 +173,6 @@ public class EmploymentCollectorService {
     /**
      * 여러 연도의 데이터 한번에 수집
      */
-    @Transactional
     public void collectMultipleYears(int fromYear, int toYear) {
         log.info("🚀 Starting multi-year employment data collection ({} - {})", fromYear, toYear);
 
