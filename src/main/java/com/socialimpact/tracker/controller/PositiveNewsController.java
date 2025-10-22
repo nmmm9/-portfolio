@@ -2,6 +2,7 @@ package com.socialimpact.tracker.controller;
 
 import com.socialimpact.tracker.entity.PositiveNews;
 import com.socialimpact.tracker.repository.PositiveNewsRepository;
+import com.socialimpact.tracker.service.PositiveNewsCollectorService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -21,6 +22,34 @@ import java.util.Map;
 public class PositiveNewsController {
 
     private final PositiveNewsRepository positiveNewsRepository;
+    private final PositiveNewsCollectorService collectorService;
+
+    /**
+     * POST /api/positive-news/collect
+     * 긍정 뉴스 수집
+     */
+    @PostMapping("/collect")
+    public ResponseEntity<Map<String, Object>> collectPositiveNews(
+            @RequestParam(defaultValue = "2023") int fromYear,
+            @RequestParam(defaultValue = "2024") int toYear) {
+
+        log.info("🚀 Starting positive news collection ({} - {})", fromYear, toYear);
+
+        new Thread(() -> {
+            try {
+                collectorService.collectAllPositiveNews(fromYear, toYear);
+            } catch (Exception e) {
+                log.error("❌ Collection failed", e);
+            }
+        }).start();
+
+        return ResponseEntity.ok(Map.of(
+                "message", "긍정 뉴스 수집이 시작되었습니다.",
+                "fromYear", fromYear,
+                "toYear", toYear,
+                "status", "processing"
+        ));
+    }
 
     /**
      * GET /api/positive-news/organization/{orgId}
