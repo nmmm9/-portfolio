@@ -40,7 +40,7 @@ server:
 # OpenDart API 설정
 opendart:
   base-url: https://opendart.fss.or.kr
-  api-key: ${DART_API_KEY}
+  api-key: ${DART_API_KEY:your_dart_api_key_here}
   http:
     connect-timeout-ms: 10000
     read-timeout-ms: 30000
@@ -50,16 +50,15 @@ opendart:
 
 # 데이터 수집 설정
 ingest:
-  on-startup: false # 시작 시 자동 수집 비활성화 (이미 PowerShell로 저장됨)
+  on-startup: false
   parallelism: 2
   donation:
-    on-startup: false  # DART 데이터는 이미 저장되어 있음
+    on-startup: false
     from-year: 2021
     to-year: 2024
     consolidated: true
 
-
-# 로깅 설정 (콘솔에만 출력, 파일 생성 안 함)
+# 로깅 설정
 logging:
   level:
     com.socialimpact.tracker: DEBUG
@@ -78,11 +77,12 @@ cors:
   allowed-methods: "GET,POST,PUT,DELETE,OPTIONS"
   allowed-headers: "*"
   max-age: 3600
+
 # 네이버 검색 API 설정
 naver:
   api:
-    client-id: ${NAVER_CLIENT_ID}
-    client-secret: ${NAVER_CLIENT_SECRET}
+    client-id: Va_hrtoG1PB2ZdYGHCUN
+    client-secret: cFgsGV98Cb
     search-url: https://openapi.naver.com/v1/search/news.json
 
 # 긍정 뉴스 수집 설정
@@ -94,5 +94,5 @@ positive-news:
     education: "교육지원,멘토링,장학생,인재양성"
     employment: "일자리,채용,인턴십,청년고용"
     community: "지역사회,상생,협력,협약"
-  display: 100 # 한 번에 가져올 뉴스 개수 (최대 100)
-  start-year: 2023 # 수집 시작 연도
+  display: 100
+  start-year: 2023

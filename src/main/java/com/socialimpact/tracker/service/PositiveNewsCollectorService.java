@@ -14,10 +14,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 
 @Service
 @RequiredArgsConstructor
@@ -40,7 +39,6 @@ public class PositiveNewsCollectorService {
     @Value("${positive-news.display:100}")
     private int display;
 
-    // 키워드 카테고리 매핑
     private static final Map<String, List<String>> KEYWORD_CATEGORIES = Map.of(
             "기부", Arrays.asList("기부", "후원", "기증", "장학금", "지원금"),
             "봉사", Arrays.asList("봉사", "재능기부", "사회공헌"),
@@ -50,9 +48,13 @@ public class PositiveNewsCollectorService {
             "지역사회", Arrays.asList("지역사회", "상생", "협력", "협약")
     );
 
-    /**
-     * 전체 조직의 긍정 뉴스 수집
-     */
+    private static final List<String> EXCLUDE_KEYWORDS = Arrays.asList(
+            "사망", "사고", "폭발", "화재", "소송", "분쟁", "논란",
+            "비리", "횡령", "구속", "기소", "의혹", "스캔들"
+    );
+
+    private static final String KOREAN_PARTICLES = "가는이을를에의와과도만한테께서";
+
     public void collectAllPositiveNews(int fromYear, int toYear) {
         log.info("🚀 Starting positive news collection ({} - {})", fromYear, toYear);
 
@@ -72,7 +74,6 @@ public class PositiveNewsCollectorService {
                     skipCount++;
                 }
 
-                // API 호출 제한 방지 (0.5초 대기)
                 Thread.sleep(500);
 
             } catch (Exception e) {
@@ -83,14 +84,10 @@ public class PositiveNewsCollectorService {
         log.info("✅ Collection completed! Success: {}, Skipped: {}", successCount, skipCount);
     }
 
-    /**
-     * 특정 조직의 긍정 뉴스 수집
-     */
     @Transactional
     public int collectNewsForOrganization(Organization org, int fromYear, int toYear) {
         int totalCount = 0;
 
-        // 각 카테고리별로 키워드 검색
         for (Map.Entry<String, List<String>> entry : KEYWORD_CATEGORIES.entrySet()) {
             String category = entry.getKey();
             List<String> keywords = entry.getValue();
@@ -98,11 +95,16 @@ public class PositiveNewsCollectorService {
             for (String keyword : keywords) {
                 try {
                     String query = org.getName() + " " + keyword;
-                    int count = searchAndSaveNews(org, query, category, keyword, fromYear, toYear);
-                    totalCount += count;
 
-                    // API 호출 제한 (0.3초)
-                    Thread.sleep(300);
+                    for (int page = 1; page <= 3; page++) {
+                        int start = (page - 1) * 100 + 1;
+                        int count = searchAndSaveNews(org, query, category, keyword, fromYear, toYear, start);
+                        totalCount += count;
+
+                        if (count == 0) break;
+
+                        Thread.sleep(300);
+                    }
 
                 } catch (Exception e) {
                     log.debug("⚠️ Search failed for {} + {}: {}", org.getName(), keyword, e.getMessage());
@@ -113,11 +115,8 @@ public class PositiveNewsCollectorService {
         return totalCount;
     }
 
-    /**
-     * 네이버 뉴스 검색 및 저장
-     */
     private int searchAndSaveNews(Organization org, String query, String category,
-                                  String keyword, int fromYear, int toYear) {
+                                  String keyword, int fromYear, int toYear, int start) {
         try {
             WebClient webClient = webClientBuilder.baseUrl(searchUrl).build();
             ObjectMapper mapper = new ObjectMapper();
@@ -126,7 +125,8 @@ public class PositiveNewsCollectorService {
                     .uri(uriBuilder -> uriBuilder
                             .queryParam("query", query)
                             .queryParam("display", display)
-                            .queryParam("sort", "date") // 최신순
+                            .queryParam("start", start)
+                            .queryParam("sort", "date")
                             .build())
                     .header("X-Naver-Client-Id", clientId)
                     .header("X-Naver-Client-Secret", clientSecret)
@@ -154,27 +154,32 @@ public class PositiveNewsCollectorService {
                     String link = item.path("link").asText();
                     String pubDate = item.path("pubDate").asText();
 
-                    // 날짜 파싱
                     LocalDate publishedDate = parseNaverDate(pubDate);
 
-                    // 연도 필터링
                     if (publishedDate == null ||
                             publishedDate.getYear() < fromYear ||
                             publishedDate.getYear() > toYear) {
                         continue;
                     }
 
-                    // 중복 체크 (URL 기준)
                     if (positiveNewsRepository.existsByUrl(link)) {
                         continue;
                     }
 
-                    // 긍정 키워드 확인
+                    // ⭐⭐⭐ 핵심: 원본 회사명만 매칭 (클린 네임 제외)
+                    if (!checkExactMatch(title + " " + description, org.getName())) {
+                        log.debug("⚠️ Filtered: {} - {}", org.getName(), title);
+                        continue;
+                    }
+
                     if (!containsPositiveKeyword(title + " " + description)) {
                         continue;
                     }
 
-                    // PositiveNews 엔티티 생성
+                    if (containsNegativeKeyword(title + " " + description)) {
+                        continue;
+                    }
+
                     PositiveNews news = new PositiveNews();
                     news.setOrganization(org);
                     news.setOrganizationName(org.getName());
@@ -189,22 +194,70 @@ public class PositiveNewsCollectorService {
                     positiveNewsRepository.save(news);
                     savedCount++;
 
+                    log.info("✅ SAVED: {} | {}", org.getName(), title);
+
                 } catch (Exception e) {
-                    log.debug("⚠️ Failed to save news item: {}", e.getMessage());
+                    log.debug("⚠️ Failed to save: {}", e.getMessage());
                 }
             }
 
             return savedCount;
 
         } catch (Exception e) {
-            log.error("❌ Search API failed: {}", e.getMessage());
+            log.error("❌ API failed: {}", e.getMessage());
             return 0;
         }
     }
 
     /**
-     * HTML 태그 제거
+     * ⭐⭐⭐ 원본 회사명만 정확히 매칭
+     * "(주)데코" 검색 시 "데코"만 있으면 제외
      */
+    private boolean checkExactMatch(String text, String companyName) {
+        if (!text.contains(companyName)) {
+            return false;
+        }
+
+        String escaped = Pattern.quote(companyName);
+        String pattern = "(^|[\\s\\(\\[\"'])(" + escaped + ")([\\s\\)\\]\"',\\.;" + KOREAN_PARTICLES + "]|$)";
+        Pattern p = Pattern.compile(pattern);
+        Matcher m = p.matcher(text);
+
+        if (!m.find()) {
+            return false;
+        }
+
+        int matchStart = m.start(2);
+        int matchEnd = m.end(2);
+
+        // 앞에 한글 체크
+        if (matchStart > 0) {
+            char prevChar = text.charAt(matchStart - 1);
+            if (Character.isLetterOrDigit(prevChar) && isKorean(prevChar)) {
+                return false;
+            }
+        }
+
+        // 뒤에 한글 체크
+        if (matchEnd < text.length()) {
+            char nextChar = text.charAt(matchEnd);
+            if (KOREAN_PARTICLES.indexOf(nextChar) >= 0) {
+                return true;
+            }
+            if (Character.isLetterOrDigit(nextChar) && isKorean(nextChar)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private boolean isKorean(char ch) {
+        return (ch >= 0xAC00 && ch <= 0xD7A3) ||
+                (ch >= 0x1100 && ch <= 0x11FF) ||
+                (ch >= 0x3130 && ch <= 0x318F);
+    }
+
     private String cleanHtml(String text) {
         if (text == null) return "";
         return text.replaceAll("<[^>]*>", "")
@@ -212,15 +265,12 @@ public class PositiveNewsCollectorService {
                 .replaceAll("&amp;", "&")
                 .replaceAll("&lt;", "<")
                 .replaceAll("&gt;", ">")
+                .replaceAll("&nbsp;", " ")
                 .trim();
     }
 
-    /**
-     * 네이버 날짜 형식 파싱 (예: "Mon, 23 Oct 2023 10:30:00 +0900")
-     */
     private LocalDate parseNaverDate(String dateStr) {
         try {
-            // "Mon, 23 Oct 2023 10:30:00 +0900" 형식
             String[] parts = dateStr.split(" ");
             if (parts.length >= 4) {
                 int day = Integer.parseInt(parts[1]);
@@ -243,15 +293,21 @@ public class PositiveNewsCollectorService {
         return null;
     }
 
-    /**
-     * 긍정 키워드 포함 여부 확인
-     */
     private boolean containsPositiveKeyword(String text) {
         for (List<String> keywords : KEYWORD_CATEGORIES.values()) {
             for (String keyword : keywords) {
                 if (text.contains(keyword)) {
                     return true;
                 }
+            }
+        }
+        return false;
+    }
+
+    private boolean containsNegativeKeyword(String text) {
+        for (String keyword : EXCLUDE_KEYWORDS) {
+            if (text.contains(keyword)) {
+                return true;
             }
         }
         return false;
