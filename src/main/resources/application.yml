@@ -55,7 +55,7 @@ server:
 # OpenDart API 설정
 opendart:
   base-url: https://opendart.fss.or.kr
-  api-key: ${DART_API_KEY}
+  api-key: ${DART_API_KEY:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
   http:
     connect-timeout-ms: 10000
     read-timeout-ms: 30000
@@ -73,11 +73,12 @@ ingest:
     to-year: 2024
     consolidated: true
 
-# 네이버 검색 API 설정
+# ⚠️⚠️⚠️ 네이버 검색 API 설정 ⚠️⚠️⚠️
+# 주의: 이 파일을 Git에 올리지 마세요!
 naver:
   api:
-    client-id: ${NAVER_CLIENT_ID}
-    client-secret: ${NAVER_CLIENT_SECRET}
+    client-id: "CrU_uDGNeDbov2s8iFfJ"
+    client-secret: "xJswaMD7l4"
     search-url: https://openapi.naver.com/v1/search/news.json
 
 # 긍정 뉴스 수집 설정

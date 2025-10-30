@@ -19,6 +19,12 @@ public interface PositiveNewsRepository extends JpaRepository<PositiveNews, Long
     // ==================== 기본 조회 ====================
 
     /**
+     * 특정 조직의 뉴스 전체 리스트
+     */
+    @Query("SELECT p FROM PositiveNews p WHERE p.organization = :organization")
+    List<PositiveNews> findByOrganization(@Param("organization") com.socialimpact.tracker.entity.Organization organization);
+
+    /**
      * 특정 조직의 뉴스 전체 (최신순)
      */
     Page<PositiveNews> findByOrganization_IdOrderByPublishedDateDesc(Long orgId, Pageable pageable);

@@ -14,8 +14,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @RestController
@@ -27,50 +25,49 @@ public class PositiveNewsController {
     private final PositiveNewsRepository positiveNewsRepository;
     private final PositiveNewsCollectorService collectorService;
 
-    private final AtomicBoolean isCollecting = new AtomicBoolean(false);
-    private final AtomicInteger totalOrgs = new AtomicInteger(0);
-    private final AtomicInteger processedOrgs = new AtomicInteger(0);
-    private final AtomicInteger collectedNews = new AtomicInteger(0);
-
     /**
      * POST /api/positive-news/collect
      * 긍정 뉴스 수집 (비동기)
+     *
+     * @param fromYear 시작 연도 (기본: 2015)
+     * @param toYear 종료 연도 (기본: 2025)
+     * @param clearBefore true면 수집 전 기존 뉴스 삭제 (기본: true)
      */
     @PostMapping("/collect")
     public ResponseEntity<Map<String, Object>> collectPositiveNews(
             @RequestParam(defaultValue = "2015") int fromYear,
-            @RequestParam(defaultValue = "2025") int toYear) {
+            @RequestParam(defaultValue = "2025") int toYear,
+            @RequestParam(defaultValue = "true") boolean clearBefore) {
 
-        if (isCollecting.get()) {
+        // 현재 수집 중인지 확인
+        Map<String, Object> currentStatus = collectorService.getCollectionStatus();
+        if ((Boolean) currentStatus.get("isCollecting")) {
             return ResponseEntity.badRequest().body(Map.of(
                     "message", "이미 수집 작업이 진행 중입니다.",
-                    "status", "already_running"
+                    "status", "already_running",
+                    "currentProgress", currentStatus.get("progress")
             ));
         }
 
-        log.info("🚀 긍정 뉴스 수집 요청 ({} - {})", fromYear, toYear);
-
-        isCollecting.set(true);
-        totalOrgs.set(0);
-        processedOrgs.set(0);
-        collectedNews.set(0);
+        log.info("🚀 긍정 뉴스 수집 요청 ({} - {}) | DB 초기화: {}", fromYear, toYear, clearBefore);
 
         // 비동기 실행
         CompletableFuture.runAsync(() -> {
             try {
-                collectorService.collectAllPositiveNews(fromYear, toYear);
+                collectorService.collectAllPositiveNews(fromYear, toYear, clearBefore);
                 log.info("✅ 긍정 뉴스 수집 완료!");
             } catch (Exception e) {
                 log.error("❌ 수집 작업 실패", e);
-            } finally {
-                isCollecting.set(false);
             }
         });
 
         return ResponseEntity.ok(Map.of(
-                "message", "긍정 뉴스 수집이 시작되었습니다.",
+                "message", clearBefore
+                        ? "기존 뉴스를 삭제하고 새로 수집을 시작했습니다."
+                        : "기존 뉴스를 유지하면서 추가 수집을 시작했습니다.",
                 "fromYear", fromYear,
                 "toYear", toYear,
+                "clearBefore", clearBefore,
                 "status", "started"
         ));
     }
@@ -81,14 +78,23 @@ public class PositiveNewsController {
      */
     @GetMapping("/collect/status")
     public ResponseEntity<Map<String, Object>> getCollectionStatus() {
+        return ResponseEntity.ok(collectorService.getCollectionStatus());
+    }
+
+    /**
+     * DELETE /api/positive-news/all
+     * 모든 긍정 뉴스 삭제
+     */
+    @DeleteMapping("/all")
+    public ResponseEntity<Map<String, Object>> deleteAllNews() {
+        long count = positiveNewsRepository.count();
+        positiveNewsRepository.deleteAll();
+
+        log.info("🗑️ 전체 뉴스 삭제 완료: {} 건", count);
+
         return ResponseEntity.ok(Map.of(
-                "isCollecting", isCollecting.get(),
-                "totalOrganizations", totalOrgs.get(),
-                "processedOrganizations", processedOrgs.get(),
-                "collectedNews", collectedNews.get(),
-                "progress", totalOrgs.get() > 0
-                        ? String.format("%.1f%%", (processedOrgs.get() * 100.0 / totalOrgs.get()))
-                        : "0%"
+                "message", "모든 긍정 뉴스가 삭제되었습니다.",
+                "deletedCount", count
         ));
     }
 
@@ -108,17 +114,13 @@ public class PositiveNewsController {
         Page<PositiveNews> news;
 
         if (year != null && category != null && !category.equals("all")) {
-            // 연도 + 카테고리 필터
             news = positiveNewsRepository.findByOrganizationYearAndCategory(orgId, year, category, pageable);
         } else if (year != null) {
-            // 연도 필터만
             news = positiveNewsRepository.findByOrganizationAndYear(orgId, year, pageable);
         } else if (category != null && !category.equals("all")) {
-            // 카테고리 필터만
             news = positiveNewsRepository.findByOrganization_IdAndCategoryOrderByPublishedDateDesc(
                     orgId, category, pageable);
         } else {
-            // 필터 없음 (전체)
             news = positiveNewsRepository.findByOrganization_IdOrderByPublishedDateDesc(orgId, pageable);
         }
 
@@ -175,6 +177,16 @@ public class PositiveNewsController {
     @GetMapping("/organization/{orgId}/count")
     public ResponseEntity<Map<String, Long>> getTotalCount(@PathVariable Long orgId) {
         long count = positiveNewsRepository.countByOrganization_Id(orgId);
+        return ResponseEntity.ok(Map.of("total", count));
+    }
+
+    /**
+     * GET /api/positive-news/total-count
+     * 전체 뉴스 개수
+     */
+    @GetMapping("/total-count")
+    public ResponseEntity<Map<String, Long>> getTotalNewsCount() {
+        long count = positiveNewsRepository.count();
         return ResponseEntity.ok(Map.of("total", count));
     }
 
