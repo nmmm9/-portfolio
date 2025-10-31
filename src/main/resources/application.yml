@@ -22,7 +22,7 @@ spring:
     properties:
       hibernate:
         dialect: org.hibernate.dialect.MySQLDialect
-        format_sql: true
+        format_sql: false
         show_sql: false
         jdbc:
           batch_size: 50
@@ -73,8 +73,7 @@ ingest:
     to-year: 2024
     consolidated: true
 
-# ⚠️⚠️⚠️ 네이버 검색 API 설정 ⚠️⚠️⚠️
-# 주의: 이 파일을 Git에 올리지 마세요!
+# 네이버 검색 API 설정
 naver:
   api:
     client-id: "CrU_uDGNeDbov2s8iFfJ"
@@ -83,20 +82,12 @@ naver:
 
 # 긍정 뉴스 수집 설정
 positive-news:
-  # 한 번에 가져올 뉴스 개수 (최대 100)
   display: 100
-
-  # 수집 시작/종료 연도
   start-year: 2015
   end-year: 2025
-
-  # API 호출 간격 (밀리초)
   api-call-interval-ms: 300
-
-  # 배치 처리 크기
   batch-size: 50
 
-  # 긍정 키워드 카테고리
   keywords:
     donation: "기부,후원,기증,장학금,지원금,성금,모금,전달식"
     volunteer: "봉사,재능기부,사회공헌,자원봉사,나눔"
@@ -107,7 +98,6 @@ positive-news:
     ethics: "윤리경영,투명경영,준법경영,공정거래,컴플라이언스"
     innovation: "R&D투자,기술개발,혁신,특허,연구개발"
 
-  # 부정 키워드 (필터링용)
   negative-keywords:
     legal: "기소,구속,벌금,과징금,제재,처벌,징역,실형,집행유예,법원,재판,소송,고소,고발,수사,압수수색,검찰,경찰,횡령,배임,사기,뇌물,비리,부정,탈세"
     management: "적자,손실,부채,파산,회생,부도,워크아웃,구조조정,감원,해고,정리해고,희망퇴직,명예퇴직,인력감축,영업정지,허가취소,면허취소"
@@ -116,24 +106,17 @@ positive-news:
     controversy: "논란,비판,질타,반발,항의,규탄,성명,우려,의혹,추정,의심,석연치,불투명,불분명"
     irrelevant: "청소원,경비원,미화원,용역,하청,사외이사,감사,이사회참석,불참,체력시험,신체검사,달리기"
 
-  # 무관한 키워드
   irrelevant-keywords: "날씨,교통,부동산,아파트,오피스텔,축구,야구,농구,골프,스포츠,드라마,영화,예능,연예인,가수,맛집,요리,레시피,음식점"
 
-# 로깅 설정
+# 로깅 설정 - 콘솔만 사용, 파일 로그 비활성화
 logging:
   level:
+    root: WARN
     com.socialimpact.tracker: INFO
-    com.socialimpact.tracker.service: DEBUG
-    org.springframework.web: INFO
-    org.hibernate.SQL: debug
-    org.hibernate.orm.jdbc.bind: trace
+    org.springframework.web: WARN
+    org.hibernate: WARN
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-  file:
-    name: logs/social-impact-tracker.log
-    max-size: 10MB
-    max-history: 30
 
 # 스케줄러 설정
 spring.task.scheduling.pool.size: 5
@@ -145,7 +128,7 @@ cors:
   allowed-headers: "*"
   max-age: 3600
 
-# Actuator 설정 (모니터링)
+# Actuator 설정
 management:
   endpoints:
     web:
