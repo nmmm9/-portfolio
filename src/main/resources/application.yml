@@ -77,7 +77,7 @@ ingest:
 naver:
   api:
     client-id: "Va_hrtoG1PB2ZdYGHCUN"
-    client-secret: "cFgsGV98Cb"
+    client-secret: "cFgsGV98Cb  "
     search-url: https://openapi.naver.com/v1/search/news.json
 
 # 긍정 뉴스 수집 설정

@@ -27,8 +27,8 @@ public class DonationController {
 
     private final DonationCollectorService donationCollectorService;
     private final DonationRepository donationRepository;
-    private final DartCollectorService dartCollectorService;  // ← 이 줄 추가
-    private final OrganizationRepository organizationRepository;  // ← 이 줄 추가
+    private final DartCollectorService dartCollectorService;
+    private final OrganizationRepository organizationRepository;
 
     /**
      * POST /api/donations/upload
@@ -147,6 +147,7 @@ public class DonationController {
                 "year", year
         ));
     }
+
     /**
      * POST /api/donations/collect-single?corpCode=00164742
      * 단일 회사 테스트 수집
@@ -156,7 +157,7 @@ public class DonationController {
             @RequestParam String corpCode) {
         log.info("🧪 단일 회사 테스트: {}", corpCode);
 
-        dartCollectorService.collectDonationData(corpCode);
+        dartCollectorService.collectDonationData(corpCode, 0);
 
         return ResponseEntity.ok(Map.of(
                 "status", "completed",
@@ -166,27 +167,90 @@ public class DonationController {
         ));
     }
 
+    /**
+     * ✨ POST /api/donations/collect-all
+     * 전체 상장사 기부금 수집 (체크포인트 지원)
+     */
     @PostMapping("/collect-all")
     public ResponseEntity<Map<String, String>> collectAllDonations() {
-        new Thread(() -> dartCollectorService.collectAllListedCompanies()).start();
+
+        if (dartCollectorService.isCollecting()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "already_running",
+                    "message", "이미 수집 작업이 진행 중입니다."
+            ));
+        }
+
+        // 비동기 실행
+        new Thread(() -> {
+            log.info("🚀 기부금 수집 스레드 시작");
+            dartCollectorService.collectAllListedCompanies();
+        }).start();
+
         return ResponseEntity.ok(Map.of(
                 "status", "started",
-                "message", "백그라운드에서 수집 시작됨"
+                "message", "백그라운드에서 수집을 시작했습니다. 체크포인트가 자동으로 저장됩니다."
         ));
     }
 
-    @GetMapping("/collect-progress")
-    public ResponseEntity<Map<String, Object>> getCollectProgress() {
+    /**
+     * ✨ POST /api/donations/collect-resume
+     * 체크포인트에서 수집 재개
+     */
+    @PostMapping("/collect-resume")
+    public ResponseEntity<Map<String, String>> resumeCollection() {
+
+        if (dartCollectorService.isCollecting()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "already_running",
+                    "message", "이미 수집 작업이 진행 중입니다."
+            ));
+        }
+
+        // 비동기 실행
+        new Thread(() -> {
+            log.info("🔄 체크포인트에서 수집 재개");
+            dartCollectorService.collectAllListedCompanies();
+        }).start();
+
         return ResponseEntity.ok(Map.of(
-                "isCollecting", dartCollectorService.isCollecting(),
-                "totalCompanies", dartCollectorService.getTotalCompanies().get(),
-                "processedCompanies", dartCollectorService.getProcessedCompanies().get(),
-                "successCount", dartCollectorService.getSuccessCount().get(),
-                "failureCount", dartCollectorService.getFailureCount().get(),
-                "progressPercentage", dartCollectorService.getProgressPercentage(),
-                "estimatedTimeRemaining", dartCollectorService.getEstimatedTimeRemaining()
+                "status", "resumed",
+                "message", "체크포인트에서 수집을 재개했습니다."
         ));
     }
+
+    /**
+     * ✨ GET /api/donations/collect-progress
+     * 수집 진행 상태 조회
+     */
+    @GetMapping("/collect-progress")
+    public ResponseEntity<Map<String, Object>> getCollectProgress() {
+        Map<String, Object> progress = new HashMap<>();
+
+        progress.put("isCollecting", dartCollectorService.isCollecting());
+        progress.put("totalCompanies", dartCollectorService.getTotalCompanies().get());
+        progress.put("processedCompanies", dartCollectorService.getProcessedCompanies().get());
+        progress.put("successCount", dartCollectorService.getSuccessCount().get());
+        progress.put("failureCount", dartCollectorService.getFailureCount().get());
+        progress.put("progressPercentage", dartCollectorService.getProgressPercentage());
+        progress.put("estimatedTimeRemaining", dartCollectorService.getEstimatedTimeRemaining());
+
+        // 진행 바 생성
+        double percentage = dartCollectorService.getProgressPercentage();
+        int barLength = 50;
+        int filled = (int) (barLength * percentage / 100);
+        StringBuilder bar = new StringBuilder();
+        bar.append("█".repeat(Math.max(0, filled)));
+        bar.append("░".repeat(Math.max(0, barLength - filled)));
+        progress.put("progressBar", bar.toString());
+
+        return ResponseEntity.ok(progress);
+    }
+
+    /**
+     * POST /api/donations/batch-import
+     * 일괄 임포트
+     */
     @PostMapping("/batch-import")
     public ResponseEntity<Map<String, Object>> batchImportDonations(
             @RequestBody List<Map<String, Object>> donationList) {
@@ -253,28 +317,20 @@ public class DonationController {
                 donationRepository.save(donation);
                 savedCount++;
 
-                log.debug("  ✅ {} {}년: {:,}원", orgName, year, amount);
-
             } catch (Exception e) {
                 failedCount++;
-                String error = String.format("처리 실패: %s - %s",
-                        item.get("organizationName"), e.getMessage());
-                errors.add(error);
-                log.warn("  ❌ {}", error);
+                errors.add(String.format("항목 처리 실패: %s", e.getMessage()));
+                log.error("❌ 임포트 실패", e);
             }
         }
 
-        log.info("✅ 임포트 완료: 성공 {}, 실패 {}", savedCount, failedCount);
+        log.info("✅ 임포트 완료: 성공 {}건, 실패 {}건", savedCount, failedCount);
 
-        Map<String, Object> result = new HashMap<>();
-        result.put("total", donationList.size());
-        result.put("savedCount", savedCount);
-        result.put("failedCount", failedCount);
-
-        if (!errors.isEmpty()) {
-            result.put("errors", errors.subList(0, Math.min(10, errors.size())));
-        }
-
-        return ResponseEntity.ok(result);
+        return ResponseEntity.ok(Map.of(
+                "savedCount", savedCount,
+                "failedCount", failedCount,
+                "errors", errors,
+                "total", donationList.size()
+        ));
     }
 }

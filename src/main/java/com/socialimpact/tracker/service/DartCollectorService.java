@@ -4,34 +4,26 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 import com.socialimpact.tracker.entity.*;
-import com.socialimpact.tracker.entity.KpiReport.ReportStatus;
 import com.socialimpact.tracker.repository.*;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.jsoup.Jsoup;
-import org.jsoup.nodes.Document;
-import org.jsoup.nodes.Element;
-import org.jsoup.select.Elements;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.ResponseEntity;
+import org.springframework.boot.SpringApplication;
+import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
+import java.io.*;
 import java.math.BigDecimal;
-import java.time.LocalDate;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
 
 @Service
 @RequiredArgsConstructor
@@ -39,13 +31,9 @@ import java.util.zip.ZipInputStream;
 public class DartCollectorService {
 
     private final WebClient.Builder webClientBuilder;
-    public final OrganizationRepository organizationRepository;
-    public final ProjectRepository projectRepository;
-    public final KpiRepository kpiRepository;
-    public final KpiReportRepository kpiReportRepository;
+    private final OrganizationRepository organizationRepository;
     private final DonationRepository donationRepository;
-
-
+    private final ApplicationContext applicationContext; // ← 추가
 
     @Value("${opendart.api-key}")
     private String dartApiKey;
@@ -59,8 +47,9 @@ public class DartCollectorService {
     @Value("${ingest.donation.to-year}")
     private int toYear;
 
-    @Value("${ingest.parallelism:4}")
-    private int parallelism;
+    // 체크포인트 파일 경로
+    private static final String CHECKPOINT_FILE = "donation_checkpoint.txt";
+    private static final String PROGRESS_FILE = "donation_progress.log";
 
     @Getter
     private final AtomicInteger totalCompanies = new AtomicInteger(0);
@@ -75,135 +64,197 @@ public class DartCollectorService {
     @Getter
     private volatile long startTime = 0;
 
+    private volatile boolean apiLimitReached = false;
+    private int consecutiveApiErrors = 0;
+    private static final int MAX_CONSECUTIVE_ERRORS = 5;
+
+    /**
+     * 🔄 체크포인트 저장
+     */
+    private void saveCheckpoint(int currentIndex, String corpCode) {
+        try {
+            Path checkpointPath = Paths.get(CHECKPOINT_FILE);
+            String data = currentIndex + "," + corpCode + "," + System.currentTimeMillis();
+            Files.writeString(checkpointPath, data);
+            log.info("💾 체크포인트 저장: {} ({})", currentIndex, corpCode);
+        } catch (IOException e) {
+            log.error("❌ 체크포인트 저장 실패", e);
+        }
+    }
+
+    /**
+     * 📖 체크포인트 로드
+     */
+    private Integer loadCheckpoint() {
+        try {
+            Path checkpointPath = Paths.get(CHECKPOINT_FILE);
+            if (Files.exists(checkpointPath)) {
+                String data = Files.readString(checkpointPath);
+                String[] parts = data.split(",");
+                if (parts.length >= 1) {
+                    int index = Integer.parseInt(parts[0]);
+                    log.info("📖 체크포인트 발견: {}번째 회사부터 재개", index);
+                    return index;
+                }
+            }
+        } catch (IOException | NumberFormatException e) {
+            log.warn("⚠️ 체크포인트 로드 실패, 처음부터 시작합니다");
+        }
+        return 0;
+    }
+
+    /**
+     * 🗑️ 체크포인트 삭제 (완료 시)
+     */
+    private void deleteCheckpoint() {
+        try {
+            Path checkpointPath = Paths.get(CHECKPOINT_FILE);
+            if (Files.exists(checkpointPath)) {
+                Files.delete(checkpointPath);
+                log.info("🗑️ 체크포인트 삭제 (수집 완료)");
+            }
+        } catch (IOException e) {
+            log.error("❌ 체크포인트 삭제 실패", e);
+        }
+    }
+
+    /**
+     * 📊 진행 상황 로그 저장
+     */
+    private void saveProgressLog(String message) {
+        try {
+            Path progressPath = Paths.get(PROGRESS_FILE);
+            String timestamp = java.time.LocalDateTime.now().toString();
+            String logEntry = String.format("[%s] %s\n", timestamp, message);
+            Files.writeString(progressPath, logEntry,
+                    Files.exists(progressPath)
+                            ? java.nio.file.StandardOpenOption.APPEND
+                            : java.nio.file.StandardOpenOption.CREATE
+            );
+        } catch (IOException e) {
+            log.debug("진행 로그 저장 실패", e);
+        }
+    }
+
+    /**
+     * 🚨 API 제한 감지
+     */
+    private boolean checkApiLimit(WebClientResponseException e) {
+        String errorBody = e.getResponseBodyAsString();
+        boolean isLimitError = e.getStatusCode().is4xxClientError()
+                || errorBody.contains("LIMITED_NUMBER_OF_SERVICE")
+                || errorBody.contains("SERVICE KEY IS NOT REGISTERED")
+                || errorBody.contains("API_LIMIT_EXCEEDED")
+                || errorBody.contains("NORMAL SERVICE");
+
+        if (isLimitError) {
+            consecutiveApiErrors++;
+            log.warn("⚠️ API 오류 감지 ({}회 연속): {}", consecutiveApiErrors, errorBody);
+
+            if (consecutiveApiErrors >= MAX_CONSECUTIVE_ERRORS) {
+                apiLimitReached = true;
+                log.error("🚫 API 제한 도달! {} 회 연속 오류", consecutiveApiErrors);
+                return true;
+            }
+        } else {
+            consecutiveApiErrors = 0; // 정상 응답 시 리셋
+        }
+
+        return false;
+    }
+
+    /**
+     * 🛑 서버 우아한 종료
+     */
+    private void shutdownGracefully() {
+        log.info("🛑 API 제한으로 인한 서버 종료 시작...");
+        log.info("📊 최종 통계:");
+        log.info("   - 총 처리: {} / {}", processedCompanies.get(), totalCompanies.get());
+        log.info("   - 성공: {}", successCount.get());
+        log.info("   - 실패: {}", failureCount.get());
+        log.info("   - 진행률: {:.2f}%", getProgressPercentage());
+
+        saveProgressLog(String.format(
+                "API 제한 도달 - 처리: %d/%d, 성공: %d, 실패: %d",
+                processedCompanies.get(), totalCompanies.get(),
+                successCount.get(), failureCount.get()
+        ));
+
+        // 5초 후 서버 종료
+        new Thread(() -> {
+            try {
+                Thread.sleep(5000);
+                log.info("👋 서버 종료 중...");
+                System.exit(0); // 강제 종료
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }).start();
+    }
+
+    /**
+     * 📋 모든 상장사 corp_code 가져오기
+     */
     public List<String> fetchAllCorpCodes() {
-        log.info("📥 Fetching all corporation codes from DART...");
-        log.info("🔑 Using API Key: {}...", dartApiKey.substring(0, 10));
+        log.info("📥 DART에서 상장사 목록 가져오기...");
+
+        List<String> corpCodes = new ArrayList<>();
 
         try {
             WebClient webClient = webClientBuilder.baseUrl(dartBaseUrl).build();
 
             byte[] zipData = webClient.get()
-                    .uri(uriBuilder -> uriBuilder
-                            .path("/api/corpCode.xml")
+                    .uri(ub -> ub.path("/corpCode.xml")
                             .queryParam("crtfc_key", dartApiKey)
                             .build())
                     .retrieve()
                     .bodyToMono(byte[].class)
                     .block();
 
-            if (zipData == null || zipData.length == 0) {
-                log.error("❌ Received empty response from DART API");
-                return new ArrayList<>();
+            if (zipData == null) {
+                log.error("❌ corpCode.xml 다운로드 실패");
+                return corpCodes;
             }
 
-            log.info("📦 ZIP file size: {} bytes", zipData.length);
-
-            if (zipData.length < 1000) {
-                log.error("❌ ZIP file too small ({}bytes), might be an error response", zipData.length);
-                log.error("Response: {}", new String(zipData, "UTF-8"));
-                return new ArrayList<>();
-            }
-
-            String xmlContent = unzipCorpCode(zipData);
-            List<String> corpCodes = parseCorpCodesFromXml(xmlContent);
-            log.info("✅ Successfully fetched {} corporation codes", corpCodes.size());
-
-            return corpCodes;
-
-        } catch (Exception e) {
-            log.error("❌ Error fetching corp codes from DART", e);
-            return new ArrayList<>();
-        }
-    }
-    private String unzipCorpCode(byte[] zipData) throws Exception {
-        log.info("🔓 Unzipping... {} bytes", zipData.length);
-
-        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
-            ZipEntry entry;
-            int entryCount = 0;
-
-            while ((entry = zis.getNextEntry()) != null) {
-                entryCount++;
-                log.info("📄 Found entry #{}: {}", entryCount, entry.getName());
-
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                byte[] buffer = new byte[1024];
-                int len;
-                while ((len = zis.read(buffer)) > 0) {
-                    baos.write(buffer, 0, len);
-                }
-
-                String content = baos.toString("UTF-8");
-                log.info("✅ Extracted {} bytes from {}", content.length(), entry.getName());
-                return content;
-            }
-
-            log.error("❌ No entries found in ZIP, entry count: {}", entryCount);
-        }
-
-        throw new Exception("No entry found in ZIP file");
-    }
-
-    private List<String> parseCorpCodesFromXml(String xml) {
-        List<String> corpCodes = new ArrayList<>();
-
-        try {
+            // ZIP 압축 해제
             XmlMapper xmlMapper = new XmlMapper();
-            JsonNode root = xmlMapper.readTree(xml);
-            JsonNode list = root.get("list");
+            try (var zis = new java.util.zip.ZipInputStream(new java.io.ByteArrayInputStream(zipData))) {
+                java.util.zip.ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null) {
+                    if (entry.getName().equals("CORPCODE.xml")) {
+                        byte[] xmlData = zis.readAllBytes();
+                        String xmlContent = new String(xmlData, "UTF-8");
 
-            if (list != null && list.isArray()) {
-                log.info("📊 Found {} items in array", list.size());
+                        JsonNode root = xmlMapper.readTree(xmlContent);
+                        JsonNode list = root.path("list");
 
-                for (JsonNode item : list) {
-                    if (!item.has("corp_code")) continue;
+                        if (list.isArray()) {
+                            for (JsonNode item : list) {
+                                String corpCode = item.path("corp_code").asText().trim();
+                                String stockCode = item.has("stock_code")
+                                        ? item.get("stock_code").asText().trim()
+                                        : "";
 
-                    String corpCode = item.get("corp_code").asText();
-                    String stockCode = item.has("stock_code") ? item.get("stock_code").asText().trim() : "";
-
-                    // 상장사 필터링: stock_code가 있고 숫자로만 구성된 경우
-                    if (!stockCode.isEmpty() && stockCode.matches("\\d{6}")) {
-                        corpCodes.add(corpCode);
+                                // 상장사만 필터링 (stock_code가 6자리 숫자)
+                                if (!stockCode.isEmpty() && stockCode.matches("\\d{6}")) {
+                                    corpCodes.add(corpCode);
+                                }
+                            }
+                            log.info("✅ 총 {}개 아이템 중 {}개 상장사 발견", list.size(), corpCodes.size());
+                        }
                     }
                 }
-
-                log.info("✅ Total items: {}, Listed companies: {}", list.size(), corpCodes.size());
             }
 
         } catch (Exception e) {
-            log.error("Error parsing XML", e);
+            log.error("❌ corpCode 가져오기 실패", e);
         }
 
         return corpCodes;
     }
-    private Organization saveOrUpdateOrganization(String corpName, String stockCode) {
-        return organizationRepository.findAll().stream()
-                .filter(o -> o.getName().equals(corpName))
-                .findFirst()
-                .orElseGet(() -> {
-                    Organization org = new Organization();
-                    org.setName(corpName);
-                    org.setType("상장사");
-                    return organizationRepository.save(org);
-                });
-    }
-    
-    public double getProgressPercentage() {
-        if (totalCompanies.get() == 0) return 0.0;
-        return (processedCompanies.get() * 100.0) / totalCompanies.get();
-    }
 
-    public long getEstimatedTimeRemaining() {
-        if (!isCollecting || processedCompanies.get() == 0) return 0;
-
-        long elapsed = System.currentTimeMillis() - startTime;
-        int remaining = totalCompanies.get() - processedCompanies.get();
-        long avgTimePerCompany = elapsed / processedCompanies.get();
-
-        return (avgTimePerCompany * remaining) / 1000;
-    }
     /**
-     * 전체 상장사 기부금 수집
+     * 🚀 전체 상장사 기부금 수집 (체크포인트 지원)
      */
     public void collectAllListedCompanies() {
         if (isCollecting) {
@@ -212,63 +263,134 @@ public class DartCollectorService {
         }
 
         isCollecting = true;
+        apiLimitReached = false;
+        consecutiveApiErrors = 0;
         startTime = System.currentTimeMillis();
-        totalCompanies.set(0);
-        processedCompanies.set(0);
-        successCount.set(0);
-        failureCount.set(0);
 
         try {
-            log.info("🚀 전체 상장사 기부금 수집 시작");
+            log.info("🚀 기부금 수집 시작");
 
             List<String> corpCodes = fetchAllCorpCodes();
             totalCompanies.set(corpCodes.size());
 
-            for (String corpCode : corpCodes) {
-                collectDonationData(corpCode);
+            // 체크포인트 로드
+            Integer startIndex = loadCheckpoint();
+            if (startIndex > 0) {
+                log.info("🔄 {}번째 회사부터 재개합니다", startIndex);
+                processedCompanies.set(startIndex);
+            } else {
+                processedCompanies.set(0);
+                successCount.set(0);
+                failureCount.set(0);
+            }
+
+            // 진행 상황 로그 초기화
+            if (startIndex == 0) {
+                saveProgressLog("=== 새로운 수집 시작 ===");
+            } else {
+                saveProgressLog(String.format("=== 수집 재개 (%d번째부터) ===", startIndex));
+            }
+
+            // 수집 시작
+            for (int i = startIndex; i < corpCodes.size(); i++) {
+                String corpCode = corpCodes.get(i);
+
+                // API 제한 체크
+                if (apiLimitReached) {
+                    log.error("🚫 API 제한 도달! 수집 중단");
+                    saveCheckpoint(i, corpCode);
+                    saveProgressLog(String.format("API 제한 - %d번째에서 중단", i));
+                    shutdownGracefully();
+                    return;
+                }
+
+                // 기부금 데이터 수집
+                boolean success = collectDonationData(corpCode, i);
+
+                // 진행 상황 로그 (10개마다)
+                if (i % 10 == 0 || !success) {
+                    double progress = getProgressPercentage();
+                    long remaining = getEstimatedTimeRemaining();
+
+                    String progressBar = createProgressBar(progress);
+                    log.info("\n{} {:.0f}%\n       처리:{}/{} | 수집:{}건(+{}) | {}",
+                            progressBar, progress,
+                            processedCompanies.get(), totalCompanies.get(),
+                            successCount.get(), success ? 1 : 0,
+                            formatTime(remaining)
+                    );
+                }
+
+                // 체크포인트 저장 (100개마다)
+                if (i % 100 == 0 && i > 0) {
+                    saveCheckpoint(i, corpCode);
+                }
+
+                // API 호출 제한 방지
                 Thread.sleep(1000);
             }
 
-            log.info("✅ 수집 완료! 성공: {}, 실패: {}", successCount.get(), failureCount.get());
+            // 수집 완료
+            deleteCheckpoint();
+            log.info("✅ 전체 수집 완료! 성공: {}, 실패: {}",
+                    successCount.get(), failureCount.get());
+            saveProgressLog(String.format(
+                    "수집 완료 - 성공: %d, 실패: %d",
+                    successCount.get(), failureCount.get()
+            ));
 
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("⚠️ 수집 작업 중단됨");
+            saveProgressLog("수집 작업 강제 중단");
         } catch (Exception e) {
             log.error("❌ 수집 작업 중 오류", e);
+            saveProgressLog("오류 발생: " + e.getMessage());
         } finally {
             isCollecting = false;
         }
     }
 
     /**
-     * 특정 회사 기부금 수집
+     * 💰 특정 회사 기부금 수집
      */
     @Transactional
-    public void collectDonationData(String corpCode) {
+    public boolean collectDonationData(String corpCode, int currentIndex) {
         try {
             processedCompanies.incrementAndGet();
 
             WebClient webClient = webClientBuilder.baseUrl(dartBaseUrl).build();
             ObjectMapper mapper = new ObjectMapper();
 
-            // 1. 회사 정보
-            String companyJson = webClient.get()
-                    .uri(ub -> ub.path("/api/company.json")
-                            .queryParam("crtfc_key", dartApiKey)
-                            .queryParam("corp_code", corpCode)
-                            .build())
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block();
+            // 1. 회사 정보 조회
+            String companyJson;
+            try {
+                companyJson = webClient.get()
+                        .uri(ub -> ub.path("/api/company.json")
+                                .queryParam("crtfc_key", dartApiKey)
+                                .queryParam("corp_code", corpCode)
+                                .build())
+                        .retrieve()
+                        .bodyToMono(String.class)
+                        .block();
+            } catch (WebClientResponseException e) {
+                if (checkApiLimit(e)) {
+                    saveCheckpoint(currentIndex, corpCode);
+                    return false;
+                }
+                throw e;
+            }
 
             JsonNode companyInfo = mapper.readTree(companyJson);
             if (!"000".equals(companyInfo.path("status").asText())) {
                 failureCount.incrementAndGet();
-                return;
+                return false;
             }
 
             String corpName = companyInfo.path("corp_name").asText();
             String stockCode = companyInfo.path("stock_code").asText();
 
-            // 2. Organization 자동 생성
+            // 2. Organization 찾기 또는 생성
             Organization org = organizationRepository.findAll().stream()
                     .filter(o -> o.getName().equals(corpName))
                     .findFirst()
@@ -281,229 +403,157 @@ public class DartCollectorService {
 
             boolean foundData = false;
 
-            // 3. 단일회사 재무제표 API로 기부금 조회
+            // 3. 연도별 기부금 데이터 수집
             for (int year = fromYear; year <= toYear; year++) {
-                final int currentYear = year; // 람다용 final 변수
+                final int currentYear = year;
+
                 try {
-                    String fnlttJson = webClient.get()
-                            .uri(ub -> ub.path("/api/fnlttSinglAcnt.json")
-                                    .queryParam("crtfc_key", dartApiKey)
-                                    .queryParam("corp_code", corpCode)
-                                    .queryParam("bsns_year", String.valueOf(currentYear))
-                                    .queryParam("reprt_code", "11011") // 사업보고서
-                                    .build())
-                            .retrieve()
-                            .bodyToMono(String.class)
-                            .block();
+                    String fnlttJson;
+                    try {
+                        fnlttJson = webClient.get()
+                                .uri(ub -> ub.path("/api/fnlttSinglAcnt.json")
+                                        .queryParam("crtfc_key", dartApiKey)
+                                        .queryParam("corp_code", corpCode)
+                                        .queryParam("bsns_year", String.valueOf(currentYear))
+                                        .queryParam("reprt_code", "11011") // 사업보고서
+                                        .build())
+                                .retrieve()
+                                .bodyToMono(String.class)
+                                .block();
+                    } catch (WebClientResponseException e) {
+                        if (checkApiLimit(e)) {
+                            saveCheckpoint(currentIndex, corpCode);
+                            return false;
+                        }
+                        continue;
+                    }
 
                     JsonNode fnlttData = mapper.readTree(fnlttJson);
                     if (!"000".equals(fnlttData.path("status").asText())) {
-                        log.trace("  {}년 API 상태: {}", currentYear, fnlttData.path("message").asText());
                         continue;
                     }
 
                     JsonNode list = fnlttData.path("list");
                     if (!list.isArray() || list.size() == 0) {
-                        log.trace("  {}년 데이터 없음", currentYear);
                         continue;
                     }
 
-                    // 4. "기부금" 항목 찾기
+                    // 4. 기부금 항목 찾기
                     for (JsonNode item : list) {
                         String accountNm = item.path("account_nm").asText();
                         String accountId = item.path("account_id").asText();
 
-                        // dart_Donations 또는 항목명에 "기부금" 포함
                         if (accountId.equals("dart_Donations") || accountNm.contains("기부금")) {
-                            // 당기 금액 우선, 없으면 전기
+                            // 금액 추출
                             String amountStr = item.path("thstrm_amount").asText();
                             if (amountStr == null || amountStr.isEmpty() || amountStr.equals("-")) {
                                 amountStr = item.path("frmtrm_amount").asText();
                             }
                             if (amountStr == null || amountStr.isEmpty() || amountStr.equals("-")) {
-                                amountStr = item.path("bfefrmtrm_amount").asText(); // 전전기
+                                continue;
                             }
 
-                            if (amountStr != null && !amountStr.isEmpty()) {
-                                amountStr = amountStr.replaceAll("[^0-9-]", "");
-
-                                if (!amountStr.isEmpty() && !amountStr.equals("-")) {
-                                    BigDecimal amount = new BigDecimal(amountStr);
-
-                                    if (amount.compareTo(BigDecimal.ZERO) > 0) {
-                                        Donation donation = donationRepository
-                                                .findByOrganization_IdAndYearAndQuarter(org.getId(), currentYear, null)
-                                                .orElse(new Donation());
-
-                                        donation.setOrganization(org);
-                                        donation.setOrganizationName(corpName);
-                                        donation.setStockCode(stockCode);
-                                        donation.setYear(currentYear);
-                                        donation.setQuarter(null);
-                                        donation.setDonationAmount(amount);
-                                        donation.setDataSource("DART_API");
-                                        donation.setReportType("사업보고서");
-                                        donation.setVerificationStatus("자동수집");
-
-                                        donationRepository.save(donation);
-                                        foundData = true;
-
-                                        log.info("  ✅ {} {}년: {} 원 ({})",
-                                                corpName, currentYear, String.format("%,d", amount), accountNm);
-                                        break;
-                                    }
-                                }
+                            amountStr = amountStr.replaceAll("[^0-9-]", "");
+                            if (amountStr.isEmpty() || amountStr.equals("-")) {
+                                continue;
                             }
+
+                            BigDecimal amount = new BigDecimal(amountStr);
+                            if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+                                continue;
+                            }
+
+                            // 기부금 저장
+                            Donation donation = donationRepository
+                                    .findByOrganization_IdAndYearAndQuarter(org.getId(), currentYear, null)
+                                    .orElse(new Donation());
+
+                            donation.setOrganization(org);
+                            donation.setOrganizationName(corpName);
+                            donation.setStockCode(stockCode);
+                            donation.setYear(currentYear);
+                            donation.setQuarter(null);
+                            donation.setDonationAmount(amount);
+                            donation.setDataSource("DART_API");
+                            donation.setReportType("사업보고서");
+                            donation.setVerificationStatus("자동수집");
+
+                            donationRepository.save(donation);
+                            foundData = true;
+
+                            log.debug("  ✅ {} {}년: {} 원", corpName, currentYear,
+                                    String.format("%,d", amount));
+                            break;
                         }
                     }
 
                     Thread.sleep(200); // API 제한 방지
 
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
                 } catch (Exception e) {
-                    log.trace("  {}년 실패", currentYear);
+                    log.trace("  {}년 처리 실패", currentYear);
                 }
             }
 
             if (foundData) {
                 successCount.incrementAndGet();
+                consecutiveApiErrors = 0; // 성공 시 에러 카운트 리셋
+                return true;
             } else {
                 failureCount.incrementAndGet();
+                return false;
             }
 
         } catch (Exception e) {
             failureCount.incrementAndGet();
+            log.trace("회사 수집 실패: {}", e.getMessage());
+            return false;
         }
     }
 
-    private BigDecimal parseXbrlForDonation(byte[] zipData) {
-        try (ZipInputStream zis = new ZipInputStream(new ByteArrayInputStream(zipData))) {
-            ZipEntry entry;
-
-            while ((entry = zis.getNextEntry()) != null) {
-                // 재무제표 XML 파일만 처리
-                if (!entry.getName().endsWith(".xml")) continue;
-
-                ByteArrayOutputStream baos = new ByteArrayOutputStream();
-                byte[] buffer = new byte[1024];
-                int len;
-                while ((len = zis.read(buffer)) > 0) {
-                    baos.write(buffer, 0, len);
-                }
-
-                String xmlContent = baos.toString("UTF-8");
-
-                // 기부금 관련 태그 검색
-                // XBRL 표준 태그: tuple_eng_donatio_expendtur_crt_trm_amount
-                if (xmlContent.contains("기부금") || xmlContent.contains("donatio")) {
-                    Document doc = Jsoup.parse(xmlContent, "", org.jsoup.parser.Parser.xmlParser());
-
-                    // 기부금 금액 추출 (여러 패턴 시도)
-                    String[] searchTags = {
-                            "tuple_eng_donatio_expendtur_crt_trm_amount", // 당기 기부금
-                            "donatio_expendtur_crt_trm_amount",
-                            "donation_amount"
-                    };
-
-                    for (String tag : searchTags) {
-                        Elements elements = doc.select(tag);
-                        if (!elements.isEmpty()) {
-                            String amountText = elements.first().text().replaceAll("[^0-9]", "");
-                            if (!amountText.isEmpty()) {
-                                return new BigDecimal(amountText);
-                            }
-                        }
-                    }
-
-                    // 태그로 못 찾으면 텍스트 패턴 검색
-                    String[] patterns = {"기부금.*?([0-9,]+)", "donatio.*?([0-9,]+)"};
-                    for (String pattern : patterns) {
-                        java.util.regex.Pattern p = java.util.regex.Pattern.compile(pattern);
-                        java.util.regex.Matcher m = p.matcher(xmlContent);
-                        if (m.find()) {
-                            String amountText = m.group(1).replaceAll(",", "");
-                            return new BigDecimal(amountText);
-                        }
-                    }
-                }
-            }
-        } catch (Exception e) {
-            log.debug("XBRL 파싱 중 오류", e);
-        }
-
-        return null;
+    /**
+     * 📊 진행률 계산
+     */
+    public double getProgressPercentage() {
+        if (totalCompanies.get() == 0) return 0.0;
+        return (processedCompanies.get() * 100.0) / totalCompanies.get();
     }
 
-    // API 테스트용 엔드포인트 추가
-    @GetMapping("/test-dart")
-    public ResponseEntity<Map<String, Object>> testDartConnection() {
-        try {
-            // 1. corpCodes.xml 다운로드 테스트
-            WebClient webClient = webClientBuilder.baseUrl(dartBaseUrl).build();
-            String corpCodesXml = webClient.get()
-                    .uri(ub -> ub.path("/api/corpCode.xml")
-                            .queryParam("crtfc_key", dartApiKey)
-                            .build())
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block();
+    /**
+     * ⏱️ 예상 남은 시간 계산 (초)
+     */
+    public long getEstimatedTimeRemaining() {
+        if (!isCollecting || processedCompanies.get() == 0) return 0;
 
-            // 2. 삼성전자(005930) 테스트
-            String testCorpCode = "00126380"; // 삼성전자
-            String companyJson = webClient.get()
-                    .uri(ub -> ub.path("/api/company.json")
-                            .queryParam("crtfc_key", dartApiKey)
-                            .queryParam("corp_code", testCorpCode)
-                            .build())
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block();
+        long elapsed = System.currentTimeMillis() - startTime;
+        int remaining = totalCompanies.get() - processedCompanies.get();
+        long avgTimePerCompany = elapsed / processedCompanies.get();
 
-            return ResponseEntity.ok(Map.of(
-                    "status", "success",
-                    "corpCodesAvailable", corpCodesXml != null && !corpCodesXml.isEmpty(),
-                    "samsungData", companyJson,
-                    "message", "DART API 연결 정상"
-            ));
-
-        } catch (Exception e) {
-            return ResponseEntity.status(500).body(Map.of(
-                    "status", "error",
-                    "message", e.getMessage()
-            ));
-        }
+        return (avgTimePerCompany * remaining) / 1000;
     }
-    private void saveKpiReport(Organization org, BigDecimal amount, int year) {
-        String projectName = org.getName() + " CSR " + year;
-        Project project = projectRepository.findAll().stream()
-                .filter(p -> p.getName().equals(projectName))
-                .findFirst()
-                .orElseGet(() -> {
-                    Project p = new Project();
-                    p.setOrganization(org);
-                    p.setName(projectName);
-                    p.setCategory("CSR");
-                    p.setStartDate(LocalDate.of(year, 1, 1));
-                    p.setEndDate(LocalDate.of(year, 12, 31));
-                    return projectRepository.save(p);
-                });
 
-        Kpi kpi = kpiRepository.findByName("Donation Amount")
-                .orElseGet(() -> {
-                    Kpi newKpi = new Kpi();
-                    newKpi.setName("Donation Amount");
-                    newKpi.setUnit("원");
-                    newKpi.setCategory("Finance");
-                    return kpiRepository.save(newKpi);
-                });
+    /**
+     * 🎨 진행 바 생성
+     */
+    private String createProgressBar(double percentage) {
+        int barLength = 50;
+        int filled = (int) (barLength * percentage / 100);
+        StringBuilder bar = new StringBuilder("[");
+        bar.append("█".repeat(Math.max(0, filled)));
+        bar.append("░".repeat(Math.max(0, barLength - filled)));
+        bar.append("]");
+        return bar.toString();
+    }
 
-        KpiReport report = new KpiReport();
-        report.setProject(project);
-        report.setKpi(kpi);
-        report.setValue(amount);
-        report.setReportDate(LocalDate.of(year, 12, 31));
-        report.setStatus(ReportStatus.APPROVED);
-        report.setApprovedBy("DART_AUTO");
-
-        kpiReportRepository.save(report);
+    /**
+     * ⏰ 시간 포맷팅 (초 -> HH:MM:SS)
+     */
+    private String formatTime(long seconds) {
+        long hours = seconds / 3600;
+        long minutes = (seconds % 3600) / 60;
+        long secs = seconds % 60;
+        return String.format("%02d:%02d:%02d", hours, minutes, secs);
     }
 }
