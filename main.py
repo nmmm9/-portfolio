@@ -1,7 +1,4 @@
-"""
-ESG 챗봇 - 간단 실행 버전
-원본 프로젝트의 RAG 로직을 그대로 사용하는 터미널 기반 챗봇
-"""
+
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -36,27 +33,23 @@ def initialize_chatbot():
     # 컬렉션 가져오기
     print("✓ 벡터 데이터베이스 로드 중...")
     try:
+        # 실제 기업 데이터 컬렉션 사용
+        collection = chroma_client.get_collection(
+            name="esg_documents_collection",
+            embedding_function=embedding_function
+        )
+    except:
+        # 없으면 샘플 데이터 컬렉션 사용
+        print("  ⚠️  실제 기업 데이터 없음 - 샘플 데이터 사용 중")
+        print("  💡 build_company_db.py를 실행하여 실제 데이터 구축하세요")
         collection = chroma_client.get_collection(
             name="ppt_documents_collection",
             embedding_function=embedding_function
         )
-    except Exception as e:
-        print(f"❌ 컬렉션 로드 실패: {e}")
-        print("\n디버깅: 사용 가능한 컬렉션 확인 중...")
-        print(f"컬렉션 목록: {chroma_client.list_collections()}")
-        raise
 
     # 저장된 문서 수 확인
-    try:
-        doc_count = collection.count()
-        # ChromaDB count()가 부정확할 수 있으므로 실제 검색으로 확인
-        test_results = collection.query(query_texts=["test"], n_results=1)
-        print(f"✓ ChromaDB 연결 성공 (컬렉션 문서 수: {doc_count}개)")
-    except Exception as e:
-        print(f"❌ 문서 수 확인 실패: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+    doc_count = collection.count()
+    print(f"✓ 총 {doc_count}개의 ESG 문서가 로드되었습니다.")
     print("=" * 60)
     print("초기화 완료! 질문을 입력하세요.\n")
 
@@ -70,6 +63,26 @@ def print_answer(result: dict):
     print("=" * 60)
     print(result['answer'])
     print("\n" + "=" * 60)
+
+    # 검증 결과 표시 (있는 경우)
+    if result.get('verification'):
+        verification = result['verification']
+        confidence = verification.get('confidence', 'unknown')
+        overall_score = verification.get('overall', 0)
+
+        # 신뢰도에 따른 이모지
+        confidence_emoji = {
+            'high': '✅',
+            'medium': '⚠️',
+            'low': '❌'
+        }
+
+        emoji = confidence_emoji.get(confidence, '❓')
+
+        print(f"\n{emoji} 답변 신뢰도: {confidence.upper()} (점수: {overall_score}/10)")
+
+        if verification.get('issues'):
+            print(f"⚠️  개선 필요: {', '.join(verification['issues'])}")
 
 
 def print_sources(result: dict):
@@ -93,7 +106,8 @@ def main():
         print("💡 사용 팁:")
         print("  - 짧은 질문도 가능합니다 (예: '탄소배출량?')")
         print("  - 기업명을 포함하면 해당 기업 정보를 우선 검색합니다")
-        print("    (예: 'CJ의 환경 전략은?', '신한의 탄소 감축 방법?')")
+        print("    (예: 'CJ의 환경 전략은?', '삼성의 탄소 감축 방법?')")
+        print("  - 연도 지정 가능 (예: '2024년 SK 재생에너지 사용률은?')")
         print("  - 종료하려면 'quit' 또는 'exit' 입력\n")
 
         # 대화 루프
@@ -126,8 +140,6 @@ def main():
 
             except Exception as e:
                 print(f"\n❌ 오류가 발생했습니다: {e}")
-                import traceback
-                traceback.print_exc()
                 print("다시 시도해주세요.")
 
     except FileNotFoundError as e:

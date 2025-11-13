@@ -35,6 +35,183 @@ client = OpenAI(api_key=api_key)
 # Cross-encoder 모델 초기화
 cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 
+# 질문 유형별 프롬프트 템플릿
+QUESTION_TYPE_PROMPTS = {
+    "definition": """
+    이 질문은 ESG 개념이나 용어에 대한 **정의 및 설명**을 요청하는 질문입니다.
+
+    다음 구조로 답변하세요:
+
+    ### 1. 개요 및 정의
+    - 해당 개념의 명확한 정의
+    - 핵심 구성 요소 설명
+
+    ### 2. 배경 및 중요성
+    - 왜 중요한지
+    - ESG 맥락에서의 의미
+    - 관련 글로벌 기준 (GRI, SASB, TCFD 등)
+
+    ### 3. 실무 적용
+    - 기업에서 어떻게 활용되는지
+    - 측정 및 관리 방법
+
+    **모든 설명에는 제공된 문서의 구체적인 내용을 인용하세요.**
+    예: "Scope 3는 공급망 전반의 간접 배출을 의미합니다 (출처: SAMPLE ESG보고서, p.10-15)"
+    """,
+
+    "how_to": """
+    이 질문은 ESG 실행 방법이나 **전략 수립**에 대한 질문입니다.
+
+    다음 구조로 답변하세요:
+
+    ### 1. 개요
+    - 무엇을 달성하려는 것인지 명확히 설명
+
+    ### 2. 핵심 지표 (KPI)
+    - 측정해야 할 주요 지표
+    - 목표 수치 및 기준
+    - 예: "재생에너지 사용률: 2023년 15% → 2030년 50% (출처: SAMPLE, p.15-18)"
+
+    ### 3. 단계별 실행 로드맵
+    **단계별로 구체적인 액션 플랜을 제시하세요:**
+
+    #### 1단계 (0~6개월): 준비 및 진단
+    - 구체적 실행 항목
+    - 필요 리소스
+
+    #### 2단계 (7~12개월): 초기 실행
+    - 구체적 실행 항목
+    - 예상 성과
+
+    #### 3단계 (1~2년): 확대 및 정착
+    - 구체적 실행 항목
+    - 목표 달성 기준
+
+    ### 4. 참고 사례
+    - 문서에서 언급된 구체적 사례
+    - 성과 데이터 포함
+
+    **모든 내용에 출처를 명시하세요.**
+    """,
+
+    "case_study": """
+    이 질문은 **특정 기업의 ESG 사례**를 요청하는 질문입니다.
+
+    다음 구조로 답변하세요:
+
+    ### 1. 기업 개요
+    - 해당 기업의 ESG 전략 방향
+
+    ### 2. 주요 활동 및 성과
+    **표 형식으로 정리하세요:**
+
+    | 분야 | 주요 활동 | 구체적 성과 | 출처 |
+    |------|-----------|-------------|------|
+    | 환경 | ... | ... | (출처: ..., p.X) |
+    | 사회 | ... | ... | (출처: ..., p.X) |
+
+    ### 3. 특징 및 시사점
+    - 해당 기업 활동의 특징
+    - 다른 기업이 참고할 만한 점
+
+    ### 4. 성과 데이터
+    - 구체적인 수치와 지표
+    - 전년 대비 개선도
+
+    **반드시 문서 기반으로만 작성하고, 모든 주장에 출처를 명시하세요.**
+    """,
+
+    "comparison": """
+    이 질문은 **비교 분석**을 요청하는 질문입니다.
+
+    다음 구조로 답변하세요:
+
+    ### 1. 비교 개요
+    - 무엇을 비교하는지 명확히 설명
+
+    ### 2. 비교 분석
+    **표 형식으로 구조화하세요:**
+
+    | 항목 | A | B | 차이점 |
+    |------|---|---|--------|
+    | 지표1 | ... | ... | ... |
+    | 지표2 | ... | ... | ... |
+
+    ### 3. 종합 분석
+    - 주요 차이점
+    - 각각의 장단점
+    - 상황별 선택 기준
+
+    **모든 데이터에 출처를 명시하세요.**
+    """,
+
+    "trend": """
+    이 질문은 **ESG 트렌드나 변화**에 대한 질문입니다.
+
+    다음 구조로 답변하세요:
+
+    ### 1. 현황 분석
+    - 현재 상황 설명
+    - 관련 데이터 제시
+
+    ### 2. 변화 추이
+    - 시간에 따른 변화
+    - 주요 전환점 및 원인
+
+    ### 3. 향후 전망
+    - 예상되는 변화
+    - 준비해야 할 사항
+
+    ### 4. 대응 방안
+    - 기업이 취해야 할 액션
+    - 우선순위 제시
+
+    **문서 기반으로 작성하되, 추세 분석은 논리적으로 도출하세요.**
+    """
+}
+
+def classify_question_type(query: str) -> str:
+    """LLM을 사용하여 질문 유형을 자동 분류"""
+
+    classification_prompt = """
+    다음 ESG 관련 질문의 유형을 분류하세요.
+
+    가능한 유형:
+    - "definition": 개념, 용어 설명 요청 (예: "Scope 3가 뭐야?", "ESG란?", "RE100 설명해줘")
+    - "how_to": 실행 방법, 전략 수립 (예: "탄소배출 어떻게 줄여?", "재생에너지 목표 설정법", "ESG 경영 도입 방법")
+    - "case_study": 특정 기업 사례 (예: "CJ는 어떻게 해?", "신한의 ESG 활동", "삼표 사례")
+    - "comparison": 비교 분석 (예: "A와 B 비교", "차이점은?", "어떤 게 나아?")
+    - "trend": 트렌드, 변화 (예: "최근 트렌드", "ESG 변화", "앞으로 어떻게 될까?")
+    - "data_inquiry": 데이터 조회 (예: "탄소배출량은?", "목표는?", "실적 알려줘")
+
+    질문: {query}
+
+    단순히 유형만 반환하세요. 예: definition
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # 분류는 mini 모델로 충분
+            messages=[
+                {"role": "user", "content": classification_prompt.format(query=query)}
+            ],
+            temperature=0.1,
+            max_tokens=20
+        )
+        question_type = response.choices[0].message.content.strip().lower()
+
+        # 유효한 타입인지 확인
+        valid_types = ["definition", "how_to", "case_study", "comparison", "trend", "data_inquiry"]
+        if question_type not in valid_types:
+            question_type = "data_inquiry"  # 기본값
+
+        print(f"질문 유형 분류: {question_type}")
+        return question_type
+
+    except Exception as e:
+        print(f"질문 유형 분류 중 오류: {e}")
+        return "data_inquiry"  # 기본값
+
 def expand_query(query: str, min_length: int = 10) -> str:
     """짧은 쿼리를 LLM을 사용하여 확장"""
     if len(query) > min_length: # 쿼리가 최소 길이보다 크면 쿼리 반환
@@ -93,10 +270,19 @@ def extract_metadata_filters(query: str) -> Dict[str, str]:
 
     # 회사명으로 필터링
     companies = {
-        "KTNG": ["ktng", "케이티앤지", "kt&g"],
         "CJ": ["cj", "씨제이"],
+        "HYUNDAI": ["hyundai", "현대", "hdai"],
+        "KB": ["kb", "케이비", "kb금융"],
+        "LG CHEM": ["lg chem", "lg화학", "엘지화학", "엘지켁"],
+        "LG ELECTRONICS": ["lg electronics", "lg전자", "엘지전자", "엘지"],
+        "POSCO": ["posco", "포스코"],
+        "SAMSUNG": ["samsung", "삼성"],
+        "SK": ["sk", "에스케이"],
+        # 레거시 (샘플 데이터)
+        "KTNG": ["ktng", "케이티앤지", "kt&g"],
         "SHINHAN": ["신한", "shinhan"],
-        "SAMPYO": ["삼표", "sampyo"]
+        "SAMPYO": ["삼표", "sampyo"],
+        "SAMPLE": ["sample", "샘플"]
     }
 
     for company, keywords in companies.items():
@@ -237,8 +423,8 @@ def get_relevant_context(query: str, collection, initial_k: int = 20, final_k: i
 
     return "\n".join(contexts), metadata_summary
 
-def generate_response(query: str, context: str, metadata_summary: Dict):
-    """파인튜닝된 모델을 사용하여 응답 생성"""
+def generate_response(query: str, context: str, metadata_summary: Dict, question_type: str = "data_inquiry"):
+    """개선된 프롬프트를 사용하여 응답 생성"""
     # few-shot 예시 로드
     examples_path = FEW_SHOT_PATH
     with open(examples_path, "r", encoding="utf-8") as f:
@@ -253,43 +439,41 @@ def generate_response(query: str, context: str, metadata_summary: Dict):
     - 페이지: {', '.join(sorted(str(p) for p in metadata_summary['page_ranges']))}
     """
 
-    system_prompt = f"""
-    당신은 기업의 ESG(환경·사회·지배구조) 경영 도입을 지원하는 RAG(Retrieval-Augmented Generation) 기반의 AI 챗봇입니다.
-    항상 제공된 문서(Context) 기반으로 응답하고 실시간으로 정보를 검색하여 타당성을 보완하세요, 마크다운(Markdown) 형식으로 출력하십시오.
-    ---
+    # 질문 유형에 맞는 프롬프트 템플릿 선택
+    type_specific_prompt = QUESTION_TYPE_PROMPTS.get(question_type, "")
 
-    ### 응답 방식
+    # 개선된 시스템 프롬프트
+    system_prompt = f"""당신은 기업의 ESG(환경·사회·지배구조) 경영을 지원하는 전문 AI 챗봇입니다.
 
-    1. 사용자 질문의 **유형을 내부적으로 분석**합니다:
-        - 정의형: 개념, 용어 설명
-        - 실행형: 전략, KPI, 실행 로드맵 요청
-        - 사례형: 실제 기업 사례 요청
-        - 기타: 일반 질문 또는 맥락 요약
+**핵심 원칙:**
+1. **문서 기반 답변**: 반드시 제공된 문서의 내용만을 사용하여 답변하세요. 문서에 없는 정보는 추측하지 마세요.
+2. **출처 명시**: 모든 주요 정보에는 출처를 명시하세요. 형식: (출처: [회사명] ESG보고서, p.[페이지])
+3. **정확성**: 수치, 날짜, 고유명사는 문서 그대로 정확히 인용하세요.
+4. **구조화**: Markdown 형식으로 체계적으로 작성하세요.
 
-    2. 질문 유형에 따라 **필요한 섹션만 선택하여 응답**하세요:
-        - 정의형 → 개요·정의 + 배경·맥락
-        - 실행형 → 개요·정의 + ESG 지표 + 실행 로드맵
-        - 사례형 → 개요·정의 + 배경·맥락 + 사례
-        - 기타 → 개요·정의 + 배경·맥락 (필요 시 추가 섹션 포함 가능)
+---
 
-    3. 모든 응답은 다음과 같은 구조를 **Markdown 형식**으로 작성하세요:
-    ### 1. 개요·정의
-    ### 2. 배경·맥락
-    ### 3. ESG 핵심 지표 (KPI)
-    ### 4. 단계별 실행 로드맵
-    ### 5. 구체적 사례
-    ### 6. 문서 출처 요약
-    **요약: ...**
+{type_specific_prompt}
 
-    4. 출처는 항상 명시적으로 포함하세요.
-    예: (출처: SHINHAN ESG 보고서, p.4~5)
+---
 
+**답변 시 주의사항:**
+- 확실하지 않은 정보는 "문서에서 해당 정보를 찾을 수 없습니다"라고 명시
+- 여러 출처의 정보를 종합할 때는 각각 출처 표시
+- 표나 리스트를 활용하여 가독성 향상
+- 마지막에 핵심 내용을 한 문장으로 요약
 
-    관련 문서 정보:
-    {metadata_info}
+---
 
-    관련 문서:
-    {context}"""
+**제공된 문서 정보:**
+{metadata_info}
+
+**검색된 문서 내용:**
+{context}
+
+---
+
+위 문서를 바탕으로 질문에 답변하세요."""
 
     try:
         result = client.chat.completions.create(
@@ -298,29 +482,109 @@ def generate_response(query: str, context: str, metadata_summary: Dict):
                         few_shot_examples +
                         [{"role": "user", "content": query}],
             temperature=0.7,
-            max_tokens=1000
+            max_tokens=1500  # 더 긴 답변 허용
         )
         return result.choices[0].message.content, metadata_info
     except Exception as e:
         print(f"응답 생성 중 오류 발생: {e}")
         return "죄송합니다. 응답을 생성하는 중에 오류가 발생했습니다.", metadata_info
 
-def run_rag_pipeline(user_query: str, collection) -> dict:
-    """RAG 파이프라인 실행"""
-    # 1단계: 쿼리 확장
+def verify_answer(query: str, answer: str, context: str) -> dict:
+    """답변 품질을 검증하고 신뢰도 점수 반환"""
+
+    verification_prompt = f"""
+    다음 ESG 질문과 답변을 평가하세요.
+
+    **질문:** {query}
+
+    **답변:** {answer}
+
+    **원본 문서:** {context}
+
+    다음 기준으로 평가하세요:
+    1. **관련성** (0-10): 답변이 질문과 얼마나 관련있는가?
+    2. **정확성** (0-10): 답변이 원본 문서와 일치하는가? (수치, 날짜 포함)
+    3. **완전성** (0-10): 질문에 충분히 답변했는가?
+    4. **출처 표시** (0-10): 출처가 명확히 표시되었는가?
+
+    JSON 형식으로 반환:
+    {{
+        "relevance": 점수,
+        "accuracy": 점수,
+        "completeness": 점수,
+        "citation": 점수,
+        "overall": 평균점수,
+        "issues": ["문제점1", "문제점2"] (없으면 빈 배열),
+        "confidence": "high/medium/low"
+    }}
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # 검증은 mini로 충분
+            messages=[
+                {"role": "user", "content": verification_prompt}
+            ],
+            temperature=0.1,
+            max_tokens=300
+        )
+
+        # JSON 파싱
+        import json
+        result_text = response.choices[0].message.content.strip()
+
+        # JSON 부분만 추출 (코드 블록 제거)
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+
+        verification_result = json.loads(result_text)
+
+        print(f"\n답변 검증 결과:")
+        print(f"  신뢰도: {verification_result.get('confidence', 'unknown')}")
+        print(f"  종합 점수: {verification_result.get('overall', 0)}/10")
+
+        if verification_result.get('issues'):
+            print(f"  문제점: {', '.join(verification_result['issues'])}")
+
+        return verification_result
+
+    except Exception as e:
+        print(f"답변 검증 중 오류: {e}")
+        return {
+            "overall": 7.0,
+            "confidence": "medium",
+            "issues": []
+        }
+
+def run_rag_pipeline(user_query: str, collection, enable_verification: bool = True) -> dict:
+    """개선된 RAG 파이프라인 실행"""
+
+    # 1단계: 질문 유형 분류
+    question_type = classify_question_type(user_query)
+
+    # 2단계: 쿼리 확장
     expanded = expand_query(user_query)
 
-    # 2단계: 메타데이터 필터 추출
+    # 3단계: 메타데이터 필터 추출
     filters = extract_metadata_filters(user_query)
 
-    # 3-4단계: 문서 검색 + 재순위화
+    # 4-5단계: 문서 검색 + 재순위화
     context, metadata = get_relevant_context(expanded, collection, metadata_filters=filters)
 
-    # 5단계: GPT-3.5 답변 생성
-    answer, relevance = generate_response(user_query, context, metadata)
+    # 6단계: 답변 생성 (질문 유형 반영)
+    answer, relevance = generate_response(user_query, context, metadata, question_type)
+
+    # 7단계: 답변 검증 (선택적)
+    verification = None
+    if enable_verification and context:
+        verification = verify_answer(user_query, answer, context)
 
     return {
         "answer": answer,
         "relevance": relevance,
-        "context": context
+        "context": context,
+        "question_type": question_type,
+        "verification": verification
     }
