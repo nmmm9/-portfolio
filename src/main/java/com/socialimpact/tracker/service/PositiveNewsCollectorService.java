@@ -9,6 +9,7 @@ import com.socialimpact.tracker.repository.PositiveNewsRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -34,6 +35,7 @@ public class PositiveNewsCollectorService {
     private final WebClient.Builder webClientBuilder;
     private final PositiveNewsRepository positiveNewsRepository;
     private final OrganizationRepository organizationRepository;
+    private final ApplicationContext applicationContext;
 
     @Value("${naver.api.client-id}")
     private String clientId;
@@ -47,16 +49,14 @@ public class PositiveNewsCollectorService {
     @Value("${positive-news.display:100}")
     private int display;
 
-    // 진행 상황 추적
     private final AtomicInteger totalOrgs = new AtomicInteger(0);
     private final AtomicInteger processedOrgs = new AtomicInteger(0);
     private final AtomicInteger totalCollectedNews = new AtomicInteger(0);
     private volatile boolean isCollecting = false;
+    private volatile boolean apiLimitReached = false;  // ← 추가
 
-    // 체크포인트 파일
     private static final String CHECKPOINT_FILE = "news_collection_checkpoint.txt";
 
-    // 키워드 카테고리 매핑
     private static final Map<String, List<String>> POSITIVE_KEYWORD_CATEGORIES = Map.ofEntries(
             Map.entry("기부", Arrays.asList("기부", "후원", "기증", "장학금", "지원금", "성금", "모금", "전달식")),
             Map.entry("봉사", Arrays.asList("봉사", "재능기부", "사회공헌", "자원봉사", "나눔")),
@@ -68,7 +68,6 @@ public class PositiveNewsCollectorService {
             Map.entry("혁신", Arrays.asList("R&D투자", "기술개발", "혁신", "특허"))
     );
 
-    // 부정 키워드
     private static final Set<String> NEGATIVE_KEYWORDS = new HashSet<>(Arrays.asList(
             "기소", "구속", "벌금", "과징금", "제재", "처벌", "징역", "실형", "법원", "재판", "소송",
             "고소", "고발", "수사", "검찰", "경찰", "횡령", "배임", "사기", "뇌물", "비리", "탈세",
@@ -78,34 +77,26 @@ public class PositiveNewsCollectorService {
             "청소원", "경비원", "사외이사", "이사회참석", "불참", "체력시험"
     ));
 
-    // 무관한 키워드
     private static final Set<String> IRRELEVANT_KEYWORDS = new HashSet<>(Arrays.asList(
             "날씨", "교통", "부동산", "아파트", "축구", "야구", "드라마", "영화", "연예인", "맛집"
     ));
 
-    // 종합뉴스 필터 (여러 회사가 나열된 뉴스 제외)
     private static final Set<String> SUMMARY_NEWS_KEYWORDS = new HashSet<>(Arrays.asList(
             "장 마감 후", "장마감후", "e공시", "공시 눈에 띄네", "주요공시", "주요 공시",
             "증권사 주요 공시", "오늘의 공시", "공시 요약"
     ));
 
-    /**
-     * 체크포인트 저장
-     */
     private void saveCheckpoint(Long orgId) {
         try {
             FileWriter writer = new FileWriter(CHECKPOINT_FILE);
             writer.write(String.valueOf(orgId));
             writer.close();
-            log.debug("📍 체크포인트 저장: {}", orgId);
+            log.info("💾 체크포인트 저장: {}", orgId);
         } catch (Exception e) {
             log.warn("체크포인트 저장 실패: {}", e.getMessage());
         }
     }
 
-    /**
-     * 체크포인트 로드
-     */
     private Long loadCheckpoint() {
         try {
             File file = new File(CHECKPOINT_FILE);
@@ -119,9 +110,6 @@ public class PositiveNewsCollectorService {
         return null;
     }
 
-    /**
-     * 체크포인트 삭제
-     */
     private void deleteCheckpoint() {
         try {
             new File(CHECKPOINT_FILE).delete();
@@ -131,17 +119,27 @@ public class PositiveNewsCollectorService {
         }
     }
 
-    /**
-     * 전체 조직의 긍정 뉴스 수집 (자동 DB 초기화 포함)
-     */
-    public void collectAllPositiveNews(int fromYear, int toYear) {
-        collectAllPositiveNews(fromYear, toYear, false); // 기본적으로 기존 뉴스 유지
+    private void shutdownServer(String reason) {
+        log.error("🛑 서버 종료 시작: {}", reason);
+        log.info("📊 최종 통계:");
+        log.info("   - 총 처리: {} / {}", processedOrgs.get(), totalOrgs.get());
+        log.info("   - 수집 뉴스: {} 건", totalCollectedNews.get());
+
+        new Thread(() -> {
+            try {
+                Thread.sleep(5000);
+                log.info("👋 서버 종료 중...");
+                System.exit(0);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }).start();
     }
 
-    /**
-     * 전체 조직의 긍정 뉴스 수집
-     * @param clearBeforeCollect true면 수집 전 기존 뉴스 삭제
-     */
+    public void collectAllPositiveNews(int fromYear, int toYear) {
+        collectAllPositiveNews(fromYear, toYear, false);
+    }
+
     public void collectAllPositiveNews(int fromYear, int toYear, boolean clearBeforeCollect) {
         if (isCollecting) {
             log.warn("⚠️ 이미 수집 작업이 진행 중입니다!");
@@ -149,27 +147,24 @@ public class PositiveNewsCollectorService {
         }
 
         isCollecting = true;
+        apiLimitReached = false;  // ← 초기화
         long startTime = System.currentTimeMillis();
 
         try {
             log.info("🚀 긍정 뉴스 수집 시작 ({} - {})", fromYear, toYear);
 
-            // 1. 기존 뉴스 삭제 (옵션)
             if (clearBeforeCollect) {
                 clearAllNews();
                 deleteCheckpoint();
             }
 
-            // 2. 체크포인트 확인
             Long startFromId = loadCheckpoint();
             if (startFromId != null) {
                 log.info("📍 체크포인트 발견: ID {} 부터 재시작", startFromId);
             }
 
-            // 3. 전체 조직 조회
             List<Organization> allOrgs = organizationRepository.findAll();
 
-            // startFromId 이후부터 필터링
             List<Organization> organizations;
             if (startFromId != null) {
                 Long finalStartFromId = startFromId;
@@ -187,14 +182,27 @@ public class PositiveNewsCollectorService {
 
             log.info("✅ 총 {} 개 조직에서 뉴스 수집", organizations.size());
 
-            // 4. 각 조직의 긍정 뉴스 수집
             for (Organization org : organizations) {
+                // ← API 제한 체크 추가
+                if (apiLimitReached) {
+                    log.error("🚫 API 제한 감지, 전체 수집 중단");
+                    saveCheckpoint(org.getId());
+                    break;
+                }
+
                 try {
                     int newsCount = collectPositiveNewsForOrganization(org, fromYear, toYear);
+
+                    // ← API 제한 체크
+                    if (apiLimitReached) {
+                        log.error("🚫 API 제한 감지, 수집 중단");
+                        saveCheckpoint(org.getId());
+                        break;
+                    }
+
                     totalCollectedNews.addAndGet(newsCount);
                     processedOrgs.incrementAndGet();
 
-                    // 진행률 로그 (뉴스 수집했을 때 항상 표시)
                     if (newsCount > 0) {
                         int progress = (int) (processedOrgs.get() * 100.0 / totalOrgs.get());
                         log.info("✅ [{}] {} 건 수집 | 진행: {}/{} ({}%) | 누적: {} 건",
@@ -207,30 +215,18 @@ public class PositiveNewsCollectorService {
                                 processedOrgs.get(), totalOrgs.get(), progress, totalCollectedNews.get());
                     }
 
-                    // 체크포인트 저장 (다음 회사 ID)
                     saveCheckpoint(org.getId() + 1);
-
-                    Thread.sleep(100); // API 호출 제한
+                    Thread.sleep(100);
 
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     log.warn("작업 중단됨");
                     break;
-                } catch (RuntimeException e) {
-                    // API 제한 에러면 중단
-                    if (e.getMessage() != null && e.getMessage().contains("API_LIMIT_EXCEEDED")) {
-                        log.error("🚫 API 할당량 초과로 중단됨");
-                        log.info("📍 체크포인트 저장됨: {} 부터 재시작 가능", org.getName());
-                        saveCheckpoint(org.getId()); // 현재 회사 ID 저장 (다음에 이 회사부터 재시작)
-                        break;
-                    }
-                    log.error("❌ 회사 수집 실패 [{}]: {}", org.getName(), e.getMessage());
                 } catch (Exception e) {
                     log.error("❌ 회사 수집 실패 [{}]: {}", org.getName(), e.getMessage());
                 }
             }
 
-            // 모든 수집 완료 시 체크포인트 삭제
             if (processedOrgs.get() >= organizations.size()) {
                 deleteCheckpoint();
                 log.info("✅ 전체 수집 완료!");
@@ -249,9 +245,6 @@ public class PositiveNewsCollectorService {
         }
     }
 
-    /**
-     * 기존 뉴스 전체 삭제
-     */
     @Transactional
     public void clearAllNews() {
         long count = positiveNewsRepository.count();
@@ -263,20 +256,28 @@ public class PositiveNewsCollectorService {
         }
     }
 
-    /**
-     * 특정 조직의 긍정 뉴스 수집
-     */
     @Transactional
     public int collectPositiveNewsForOrganization(Organization org, int fromYear, int toYear) {
         Set<String> processedUrls = ConcurrentHashMap.newKeySet();
         int totalCount = 0;
 
-        // 전략 1: 키워드 카테고리별 검색
         for (Map.Entry<String, List<String>> entry : POSITIVE_KEYWORD_CATEGORIES.entrySet()) {
+            // ← API 제한 체크 추가
+            if (apiLimitReached) {
+                log.warn("API 제한 플래그 감지, 키워드 루프 중단");
+                return totalCount;
+            }
+
             String category = entry.getKey();
             List<String> keywords = entry.getValue();
 
             for (String keyword : keywords) {
+                // ← API 제한 체크 추가
+                if (apiLimitReached) {
+                    log.warn("API 제한 플래그 감지, 검색 중단");
+                    return totalCount;
+                }
+
                 try {
                     String query = org.getName() + " " + keyword;
                     int count = searchAndSaveNews(org, query, category, keyword, fromYear, toYear, processedUrls);
@@ -286,24 +287,17 @@ public class PositiveNewsCollectorService {
                         log.info("  ✓ [{}] {}: {} 건", org.getName(), keyword, count);
                     }
 
-                    Thread.sleep(100); // API 호출 제한
+                    Thread.sleep(100);
 
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
-                } catch (RuntimeException e) {
-                    // API 제한 에러면 상위로 전파
-                    if (e.getMessage() != null && e.getMessage().contains("API_LIMIT_EXCEEDED")) {
-                        throw e;
-                    }
-                    log.debug("⚠️ 검색 실패 [{} + {}]: {}", org.getName(), keyword, e.getMessage());
                 } catch (Exception e) {
                     log.debug("⚠️ 검색 실패 [{} + {}]: {}", org.getName(), keyword, e.getMessage());
                 }
             }
         }
 
-        // 전략 2: 회사명만으로 검색 (추가 뉴스 발굴)
         try {
             int count = searchAndSaveNews(org, org.getName(), "전체", "전체", fromYear, toYear, processedUrls);
             totalCount += count;
@@ -317,9 +311,6 @@ public class PositiveNewsCollectorService {
         return totalCount;
     }
 
-    /**
-     * 네이버 뉴스 검색 및 저장
-     */
     private int searchAndSaveNews(Organization org, String query, String category,
                                   String keyword, int fromYear, int toYear,
                                   Set<String> processedUrls) {
@@ -332,7 +323,6 @@ public class PositiveNewsCollectorService {
 
             ObjectMapper mapper = new ObjectMapper();
 
-            // 네이버 검색 API 호출 (타임아웃 설정 추가)
             String response = webClient.get()
                     .uri(uriBuilder -> uriBuilder
                             .queryParam("query", query)
@@ -341,14 +331,15 @@ public class PositiveNewsCollectorService {
                             .build())
                     .retrieve()
                     .bodyToMono(String.class)
-                    .timeout(Duration.ofSeconds(10)) // 타임아웃 10초
+                    .timeout(Duration.ofSeconds(10))
                     .onErrorResume(error -> {
                         String errorMsg = error.getMessage();
                         log.warn("API 호출 실패: {}", errorMsg);
 
-                        // 429 에러 (API 제한)면 예외 던지기
                         if (errorMsg != null && errorMsg.contains("429")) {
-                            log.error("🚫 API 할당량 초과! 프로그램 중단");
+                            log.error("🚫 API 할당량 초과! 서버 종료 시작");
+                            apiLimitReached = true;  // ← 플래그 설정
+                            shutdownServer("API 할당량 초과");  // ← 즉시 호출
                             throw new RuntimeException("API_LIMIT_EXCEEDED: " + errorMsg);
                         }
 
@@ -376,7 +367,6 @@ public class PositiveNewsCollectorService {
                     String link = item.path("link").asText();
                     String pubDate = item.path("pubDate").asText();
 
-                    // 날짜 파싱 및 연도 필터링
                     LocalDate publishedDate = parseNaverDate(pubDate);
                     if (publishedDate == null ||
                             publishedDate.getYear() < fromYear ||
@@ -384,50 +374,39 @@ public class PositiveNewsCollectorService {
                         continue;
                     }
 
-                    // URL 중복 체크
                     if (processedUrls.contains(link) || positiveNewsRepository.existsByUrl(link)) {
                         continue;
                     }
 
                     String fullText = title + " " + description;
 
-                    // ========== 필터링 로직 ==========
-
-                    // 1. 회사명 정확히 포함 확인 (필수) - 단어 경계로 체크
                     String escapedName = org.getName().replaceAll("([\\(\\)\\[\\]\\{\\}])", "\\\\$1");
                     if (!fullText.matches(".*\\b" + escapedName + "\\b.*")) {
                         continue;
                     }
 
-                    // 2. 종합뉴스 필터링 (여러 회사가 나열된 뉴스)
                     if (isSummaryNews(title, description)) {
                         log.trace("❌ 종합뉴스: {}", title);
                         continue;
                     }
 
-                    // 3. 부정 키워드 필터링
                     if (containsNegativeKeyword(fullText)) {
                         log.trace("❌ 부정 키워드: {}", title);
                         continue;
                     }
 
-                    // 4. 무관한 키워드 필터링
                     if (containsIrrelevantKeyword(fullText)) {
                         log.trace("❌ 무관한 내용: {}", title);
                         continue;
                     }
 
-                    // 5. 긍정 키워드 확인
                     if (!containsPositiveKeyword(fullText)) {
                         continue;
                     }
 
-                    // 6. 뉴스 품질 검증
                     if (!isQualityNews(title, description)) {
                         continue;
                     }
-
-                    // ========== 저장 ==========
 
                     PositiveNews news = new PositiveNews();
                     news.setOrganization(org);
@@ -441,7 +420,7 @@ public class PositiveNewsCollectorService {
                     news.setMatchedKeywords(keyword);
 
                     positiveNewsRepository.save(news);
-                    positiveNewsRepository.flush();  // 즉시 DB 반영
+                    positiveNewsRepository.flush();
                     processedUrls.add(link);
                     savedCount++;
 
@@ -460,18 +439,13 @@ public class PositiveNewsCollectorService {
         }
     }
 
-    // ========== 필터링 메서드들 ==========
-
     private boolean isSummaryNews(String title, String description) {
         String fullText = title + " " + description;
 
-        // 방법 1: 명백한 종합뉴스 키워드
         if (SUMMARY_NEWS_KEYWORDS.stream().anyMatch(fullText::contains)) {
             return true;
         }
 
-        // 방법 2: 여러 회사명이 나열되었는지 체크
-        // "(주)" 또는 "㈜" 가 3개 이상이면 종합뉴스로 판단
         long companyMarkerCount = fullText.chars().filter(ch -> ch == '㈜').count() +
                 (fullText.split("\\(주\\)").length - 1);
 
@@ -479,7 +453,6 @@ public class PositiveNewsCollectorService {
             return true;
         }
 
-        // 방법 3: 타이틀에 "등", "外"가 있고 본문에 회사명이 여러 개
         if ((title.contains("등") || title.contains("外")) && companyMarkerCount >= 2) {
             return true;
         }
@@ -533,7 +506,6 @@ public class PositiveNewsCollectorService {
 
     private LocalDate parseNaverDate(String dateStr) {
         try {
-            // 네이버 날짜 형식: "Mon, 16 Dec 2024 10:30:00 +0900"
             DateTimeFormatter formatter = DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss Z", Locale.ENGLISH);
             return LocalDate.parse(dateStr, formatter);
         } catch (Exception e) {
@@ -542,9 +514,6 @@ public class PositiveNewsCollectorService {
         }
     }
 
-    /**
-     * 수집 진행 상황 조회
-     */
     public Map<String, Object> getCollectionStatus() {
         Map<String, Object> status = new HashMap<>();
         status.put("isCollecting", isCollecting);
@@ -557,7 +526,6 @@ public class PositiveNewsCollectorService {
                 : 0;
         status.put("progress", progress + "%");
 
-        // 체크포인트 정보
         Long checkpoint = loadCheckpoint();
         if (checkpoint != null) {
             status.put("checkpoint", checkpoint);
@@ -567,9 +535,6 @@ public class PositiveNewsCollectorService {
         return status;
     }
 
-    /**
-     * 특정 조직의 뉴스 통계
-     */
     public Map<String, Object> getNewsStatistics(Long orgId) {
         Map<String, Object> stats = new HashMap<>();
 
@@ -584,7 +549,6 @@ public class PositiveNewsCollectorService {
         stats.put("organizationName", org.getName());
         stats.put("totalNews", newsList.size());
 
-        // 카테고리별 통계
         Map<String, Long> categoryStats = newsList.stream()
                 .collect(Collectors.groupingBy(
                         PositiveNews::getCategory,
@@ -592,7 +556,6 @@ public class PositiveNewsCollectorService {
                 ));
         stats.put("byCategory", categoryStats);
 
-        // 연도별 통계
         Map<Integer, Long> yearStats = newsList.stream()
                 .filter(news -> news.getPublishedDate() != null)
                 .collect(Collectors.groupingBy(

@@ -29,15 +29,13 @@ public class PositiveNewsController {
      * POST /api/positive-news/collect
      * 긍정 뉴스 수집 (비동기)
      *
-     * @param fromYear 시작 연도 (기본: 2015)
-     * @param toYear 종료 연도 (기본: 2025)
-     * @param clearBefore true면 수집 전 기존 뉴스 삭제 (기본: true)
+     * ⚠️ 기본값 변경: clearBefore = false (기존 뉴스 유지)
      */
     @PostMapping("/collect")
     public ResponseEntity<Map<String, Object>> collectPositiveNews(
             @RequestParam(defaultValue = "2015") int fromYear,
             @RequestParam(defaultValue = "2025") int toYear,
-            @RequestParam(defaultValue = "true") boolean clearBefore) {
+            @RequestParam(defaultValue = "false") boolean clearBefore) {  // ← false로 변경!
 
         // 현재 수집 중인지 확인
         Map<String, Object> currentStatus = collectorService.getCollectionStatus();
