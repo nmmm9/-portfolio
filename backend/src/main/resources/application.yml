@@ -1,0 +1,139 @@
+spring:
+  application:
+    name: Social Impact Tracker
+
+  # 데이터베이스 설정
+  datasource:
+    url: jdbc:mysql://127.0.0.1:3306/social_impact_db?useSSL=false&allowPublicKeyRetrieval=true&characterEncoding=UTF-8&serverTimezone=Asia/Seoul
+    username: root
+    password: 1234
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  # JPA 설정
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: false
+        show_sql: false
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+    open-in-view: false
+
+  # JSON 직렬화 설정
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+      indent-output: true
+    time-zone: Asia/Seoul
+    date-format: yyyy-MM-dd'T'HH:mm:ss
+    default-property-inclusion: non_null
+
+# 서버 설정
+server:
+  port: 8080
+  servlet:
+    context-path: /
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+  tomcat:
+    max-threads: 200
+    min-spare-threads: 10
+
+# OpenDart API 설정
+opendart:
+  base-url: https://opendart.fss.or.kr
+  api-key: ${DART_API_KEY:xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx}
+  http:
+    connect-timeout-ms: 10000
+    read-timeout-ms: 30000
+    retry:
+      max-attempts: 3
+      backoff-ms: 1000
+
+# 데이터 수집 설정
+ingest:
+  on-startup: false
+  parallelism: 2
+  donation:
+    on-startup: false
+    from-year: 2021
+    to-year: 2024
+    consolidated: true
+
+# 네이버 검색 API 설정
+naver:
+  api:
+    client-id: "CrU_uDGNeDbov2s8iFfJ"
+    client-secret: "xJswaMD7l4"
+    search-url: https://openapi.naver.com/v1/search/news.json
+
+# 긍정 뉴스 수집 설정
+positive-news:
+  display: 100
+  start-year: 2015
+  end-year: 2025
+  api-call-interval-ms: 300
+  batch-size: 50
+
+  keywords:
+    donation: "기부,후원,기증,장학금,지원금,성금,모금,전달식"
+    volunteer: "봉사,재능기부,사회공헌,자원봉사,나눔"
+    environment: "친환경,탄소중립,재생에너지,ESG,녹색경영,환경보호,탄소배출,재활용"
+    education: "교육지원,멘토링,장학생,인재양성,교육기부,직업훈련,취업지원"
+    employment: "일자리창출,채용확대,신규채용,청년고용,정규직전환,고용창출"
+    community: "지역사회,상생협력,MOU,업무협약,협약식,파트너십"
+    ethics: "윤리경영,투명경영,준법경영,공정거래,컴플라이언스"
+    innovation: "R&D투자,기술개발,혁신,특허,연구개발"
+
+  negative-keywords:
+    legal: "기소,구속,벌금,과징금,제재,처벌,징역,실형,집행유예,법원,재판,소송,고소,고발,수사,압수수색,검찰,경찰,횡령,배임,사기,뇌물,비리,부정,탈세"
+    management: "적자,손실,부채,파산,회생,부도,워크아웃,구조조정,감원,해고,정리해고,희망퇴직,명예퇴직,인력감축,영업정지,허가취소,면허취소"
+    accident: "사고,화재,폭발,누출,붕괴,사망,부상,인명피해,리콜,결함,하자,불량,오염"
+    labor: "파업,태업,쟁의,노사분규,갈등,충돌,시위,농성"
+    controversy: "논란,비판,질타,반발,항의,규탄,성명,우려,의혹,추정,의심,석연치,불투명,불분명"
+    irrelevant: "청소원,경비원,미화원,용역,하청,사외이사,감사,이사회참석,불참,체력시험,신체검사,달리기"
+
+  irrelevant-keywords: "날씨,교통,부동산,아파트,오피스텔,축구,야구,농구,골프,스포츠,드라마,영화,예능,연예인,가수,맛집,요리,레시피,음식점"
+
+# 로깅 설정 - 콘솔만 사용, 파일 로그 비활성화
+logging:
+  level:
+    root: WARN
+    com.socialimpact.tracker: INFO
+    org.springframework.web: WARN
+    org.hibernate: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# 스케줄러 설정
+spring.task.scheduling.pool.size: 5
+
+# CORS 설정
+cors:
+  allowed-origins: "*"
+  allowed-methods: "GET,POST,PUT,DELETE,OPTIONS"
+  allowed-headers: "*"
+  max-age: 3600
+
+# Actuator 설정
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized

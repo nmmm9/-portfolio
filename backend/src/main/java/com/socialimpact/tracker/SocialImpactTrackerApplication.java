@@ -1,0 +1,12 @@
+package com.socialimpact.tracker;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class SocialImpactTrackerApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(SocialImpactTrackerApplication.class, args);
+    }
+}
