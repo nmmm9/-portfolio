@@ -1,30 +1,17 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Check, ChevronDown, Search, X } from 'lucide-react';
 
-interface Option {
-  value: string;
-  label: string;
-}
-
-interface SearchableSelectProps {
-  options: Option[];
-  value: string;
-  onChange: (value: string) => void;
-  placeholder?: string;
-  className?: string;
-}
-
 export function SearchableSelect({
   options,
   value,
   onChange,
   placeholder = "선택하세요",
   className = ""
-}: SearchableSelectProps) {
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const containerRef = useRef<HTMLDivElement>(null);
-  const searchInputRef = useRef<HTMLInputElement>(null);
+  const containerRef = useRef(null);
+  const searchInputRef = useRef(null);
 
   const selectedOption = options.find(opt => opt.value === value);
 
@@ -33,8 +20,8 @@ export function SearchableSelect({
   );
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+    const handleClickOutside = (event) => {
+      if (containerRef.current && !containerRef.current.contains(event.target)) {
         setIsOpen(false);
         setSearchTerm('');
       }
@@ -50,13 +37,13 @@ export function SearchableSelect({
     }
   }, [isOpen]);
 
-  const handleSelect = (optionValue: string) => {
+  const handleSelect = (optionValue) => {
     onChange(optionValue);
     setIsOpen(false);
     setSearchTerm('');
   };
 
-  const handleClear = (e: React.MouseEvent) => {
+  const handleClear = (e) => {
     e.stopPropagation();
     onChange('');
     setSearchTerm('');
